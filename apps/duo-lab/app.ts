@@ -101,6 +101,8 @@ const sources: Sources = {
   document: () => document(),
   feed: () => feed(),
   keyboardRows: (): { id: number }[] => Array.from({ length: 40 }, (_, id): { id: number } => ({ id })),
+  arrangementRows: (): { id: number; number: string }[] =>
+    Array.from({ length: 150 }, (_, i): { id: number; number: string } => ({ id: i + 1, number: String(i + 1).padStart(3, '0') })),
   arrangementSupport: (): { available: boolean } => ({ available: false }),
 };
 export const answer: Answer = (source, args, store, storage, native): ReturnType<Answer> => {
