@@ -239,11 +239,7 @@ pub(crate) fn apply(arena: &NodeArena, slot: u32, s: &mut taffy::style::Style) {
                 left: style.padding_left.spaced(env, across).floor_lp(env, left),
             };
         }
-        Some(HostCover::Inset(_)) => {
-            let [_, _, bottom, _] = added_padding(arena, slot);
-            let spaced = style.padding_bottom.spaced(env, crate::style::cells::ROW);
-            s.padding.bottom = spaced.floor_lp(env, bottom);
-        }
+        Some(HostCover::Inset([top, bottom])) => lay_inset(arena, slot, s, 0.0, top + bottom),
         Some(HostCover::Gutter([right, bottom])) => {
             s.scrollbar_width = right.max(bottom);
             // Taffy reserves its scalar width on Scroll axes. Hidden keeps
@@ -455,10 +451,66 @@ pub(crate) fn inset(arena: &NodeArena, slot: u32) -> bool {
 
 /// `s` as authored at the end the platform's inset took (`apply`).
 pub(crate) fn without_inset(arena: &NodeArena, slot: u32, s: &mut taffy::style::Style) {
-    if inset(arena, slot) {
-        let (style, env) = (arena.effective_style(slot), arena.env());
-        let spaced = style.padding_bottom.spaced(env, crate::style::cells::ROW);
-        s.padding.bottom = spaced.floor_lp(env, 0.0);
+    if let Some(HostCover::Inset([top, bottom])) = arena.cover(slot) {
+        lay_inset(arena, slot, s, top + bottom, 0.0);
+    }
+}
+
+/// Lay `inset` points of the platform's scroll insets out in `slot`'s box,
+/// in place of the `laid` points `s` holds: bottom padding that no box
+/// sizing counts, so the box keeps the size its rows give it, as where no
+/// platform insets it. A `content-box` size is its content box's, which the
+/// insets come out of; a `border-box` one already holds the padding.
+fn lay_inset(arena: &NodeArena, slot: u32, s: &mut taffy::style::Style, laid: f32, inset: f32) {
+    let (style, env) = (arena.effective_style(slot), arena.env());
+    let spaced = style.padding_bottom.spaced(env, crate::style::cells::ROW);
+    s.padding.bottom = spaced.floor_lp(env, inset);
+    if s.box_sizing != taffy::style::BoxSizing::ContentBox || laid == inset {
+        return;
+    }
+    let by = laid - inset;
+    if let Some(v) = shifted(s.size.height.into_raw(), by) {
+        s.size.height = v.into();
+    }
+    if let Some(v) = shifted(s.min_size.height.into_raw(), by) {
+        s.min_size.height = v;
+    }
+    if let Some(v) = shifted(s.max_size.height.into_raw(), by) {
+        s.max_size.height = v;
+    }
+    // In a column, the flex basis is a block size too
+    let column = arena.parent(slot).is_some_and(|p| {
+        let parent = arena.effective_style(p);
+        parent.display == crate::Display::Flex
+            && matches!(
+                parent.flex_direction,
+                crate::FlexDirection::Column | crate::FlexDirection::ColumnReverse
+            )
+    });
+    if column {
+        if let Some(v) = shifted(s.flex_basis.into_raw(), by) {
+            s.flex_basis = v.into();
+        }
+    }
+}
+
+/// A definite size `by` points longer; `None` for one that is not definite
+/// (`auto`, `none`, a content keyword), which an inset leaves as it is.
+fn shifted(
+    raw: taffy::style::CompactLength,
+    by: f32,
+) -> Option<taffy::style::LengthPercentageAuto> {
+    use taffy::style::{CompactLength, LengthPercentageAuto as Lpa};
+    match raw.tag() {
+        CompactLength::LENGTH_TAG => Some(Lpa::length(raw.value() + by)),
+        CompactLength::PERCENT_TAG => Some(Lpa::calc(crate::style::calc_handle_in(
+            raw.value() * 100.0,
+            0.0,
+            false,
+            by,
+        ))),
+        _ if raw.is_calc() => Some(Lpa::calc(crate::style::offset_handle(raw.calc_value(), by))),
+        _ => None,
     }
 }
 

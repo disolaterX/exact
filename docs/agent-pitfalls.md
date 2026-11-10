@@ -249,14 +249,6 @@ This list holds what the [agent guide](contract-for-agents.md)'s rules don't mak
 
 ## Lists and scrolling
 
-- **A scroller with `height="100%"` under a bar runs past its box on iOS.** A
-  scroller UIKit insets under a navigation bar and over the home indicator takes
-  those insets as layout padding, which the default `box-sizing: content-box`
-  adds to an explicit height: an arranged pane on the open Duo came out 785
-  points tall in a 669-point allocation, and its last rows never scrolled into
-  view. Fix: `box-sizing="border-box"` on the scroller. (Duo Lab's Arrangement
-  screen, 2026-11-08; queued in `QUEUE.md`.)
-
 - **A frame's cell count is not its stretched layout width.** Giving the
   harness's animation rows a width of `animCols` cells changed fullscreen layout in
   a window narrower than the animation's minimum 20 cells. `width="100%"`

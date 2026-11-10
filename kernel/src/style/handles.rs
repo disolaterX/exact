@@ -88,6 +88,18 @@ pub(crate) fn tree_handle(tree: Comparison, floor: bool, added: f32) -> *const (
     handle(index << 1 | 1)
 }
 
+/// `handle`'s calculation with `by` more points added after it, as a handle.
+pub(crate) fn offset_handle(handle: *const (), by: f32) -> *const () {
+    let index = (handle as usize >> 3) - 1;
+    if index & 1 == 1 {
+        let tree = TREES.lock().unwrap_or_else(|e| e.into_inner())[index >> 1];
+        tree_handle(tree.tree, tree.floor, f32::from_bits(tree.added) + by)
+    } else {
+        let pair = CALC_PAIRS.lock().unwrap_or_else(|e| e.into_inner())[index >> 1];
+        calc_handle_in(pair.percent, pair.points, pair.floor, pair.added + by)
+    }
+}
+
 std::thread_local! {
     /// The environment of the layout running on this thread.
     static LAYOUT_ENV: std::cell::RefCell<Env> = std::cell::RefCell::new(Env::default());

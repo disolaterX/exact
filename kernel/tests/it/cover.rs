@@ -493,6 +493,69 @@ fn scrolling_content_keeps_its_extent_under_an_inset() {
         .is_err());
 }
 
+#[test]
+fn an_inset_scroller_keeps_the_box_its_sizes_give_it() {
+    let text = |t: &'static str| StyleValue::Text(t.into());
+    let n = StyleValue::Number;
+    // The ways a scroller gets a definite block size: its height (a
+    // length, a percentage, a calculation), a minimum or a maximum, and a
+    // flex basis down its column. An arranged pane fills its allocation
+    // with `height: 100%` (Duo Lab's Arrangement screen).
+    let sizes: [&[(StyleId, StyleValue)]; 7] = [
+        &[(StyleId::Height, n(500.0))],
+        &[(StyleId::Height, StyleValue::Percent(100.0))],
+        &[(StyleId::Height, text("calc(50% + 10px)"))],
+        &[(StyleId::Height, n(10.0)), (StyleId::MinHeight, n(600.0))],
+        &[
+            (StyleId::Height, StyleValue::Percent(100.0)),
+            (StyleId::MaxHeight, n(300.0)),
+        ],
+        &[
+            (StyleId::MaxHeight, text("calc(40% - 8px)")),
+            (StyleId::Height, n(700.0)),
+        ],
+        &[(StyleId::FlexBasis, n(400.0))],
+    ];
+    for sizing in ["content-box", "border-box"] {
+        for size in sizes {
+            let mut kernel = scroller(false);
+            let mut rows = vec![
+                (StyleId::FlexGrow, n(0.0)),
+                (StyleId::FlexShrink, n(0.0)),
+                (StyleId::BoxSizing, text(sizing)),
+            ];
+            rows.extend_from_slice(size);
+            kernel
+                .apply(
+                    2,
+                    3,
+                    &[Op::SetStyle {
+                        id: 4,
+                        patch: Box::new(style(&rows)),
+                    }],
+                )
+                .unwrap();
+            let authored = frame(&mut kernel, 4);
+            kernel
+                .set_host_cover(4, Some(HostCover::Inset([140.0, 34.0])))
+                .unwrap();
+            assert_eq!(frame(&mut kernel, 4), authored, "{sizing} {size:?}");
+            // The filled column rests between the insets and the padding
+            assert_eq!(
+                frame(&mut kernel, 5).3,
+                authored.3 - 32.0 - 174.0,
+                "{sizing} {size:?}"
+            );
+            kernel.set_host_cover(4, None).unwrap();
+            assert_eq!(
+                frame(&mut kernel, 4),
+                authored,
+                "cleared, {sizing} {size:?}"
+            );
+        }
+    }
+}
+
 /// The route's list (4) as a column holding a 40-point header (5) and then
 /// a scroller (6) filling the rest, with a footer (7) pinned to the route's
 /// bottom edge: a sheet component's root column, the scroller two boxes

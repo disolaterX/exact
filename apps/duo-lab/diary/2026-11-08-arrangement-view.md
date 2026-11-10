@@ -4,7 +4,7 @@ task: the UIKit arrangement reference app as an Exact screen
 
 ### Rough
 
-- A pane scroller sized `height="100%"` came out 116 points taller than UIKit's allocation, and its last rows never scrolled into view. The kernel lays a scroller's platform insets (82 under the bar, 34 over the home indicator) out as padding, which a `content-box` height adds to. `box-sizing="border-box"` keeps the pane at its allocation; the kernel issue is queued.
+- A pane scroller sized `height="100%"` came out 116 points taller than UIKit's allocation, and its last rows never scrolled into view. The kernel laid a scroller's platform insets (82 under the bar, 34 over the home indicator) out as padding, which a `content-box` height adds to. Fixed in exact2: the insets now come out of the content box, so the box keeps the size its rows give it.
 - Without a height, a pane in native layout took its content's height (11,216 points) and did not scroll. A pane has to fill its allocation to scroll in it.
 - With the safe-area adjustment disabled and no explicit content scroll view, a slow drag in the primary pane leaves the bar expanded; the UIKit reference minimizes it. An explicit primary selection minimizes it in both. Queued.
 - The secondary pane's rows run under the open Duo's side strip, where the reference ends them at the pane's safe area. Arranged panes get no side clearance, and Contract cannot read a pane's own safe area yet. Queued.

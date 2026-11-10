@@ -31,7 +31,7 @@ mod floor;
 mod handles;
 pub use calc::Comparison;
 use handles::calc_handle;
-pub(crate) use handles::{calc_handle_in, resolve_calc, tree_handle, LayoutEnv};
+pub(crate) use handles::{calc_handle_in, offset_handle, resolve_calc, tree_handle, LayoutEnv};
 pub mod env;
 pub use env::link as link_segments;
 pub use env::{uses_env, Edge, Env, EnvRefusal, Rect, Region, SegmentVar, TitleBarVar};
