@@ -206,6 +206,10 @@ pub struct CollectionSnapshot {
     pub rows: Vec<CollectionRow>,
     /// Optional anchor correction; consume at most once per revision.
     pub correction: Option<AnchorCorrection>,
+    /// It still opens at its end (`scroll-start: end`, LLP 1010 §6.5): its
+    /// rows land where the end puts them at once, as its corrections do, so
+    /// none has yet shown anywhere a move could start from.
+    pub opening: bool,
     /// A limited report left window rows unbuilt or rows past the window
     /// mounted: the host owes another report, even with unchanged facts.
     pub pending: bool,
@@ -486,6 +490,7 @@ impl super::Collection {
                 })
                 .collect(),
             correction: self.correction,
+            opening: self.at_end,
             pending: self.asks_report(),
         }
     }

@@ -308,6 +308,7 @@ impl Tree {
                 total_extent: c.index.total_height(),
                 rows,
                 correction: c.correction,
+                opening: c.at_end,
                 pending: c.asks_report(),
             });
             Ok(())

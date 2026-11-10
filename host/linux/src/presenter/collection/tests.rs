@@ -22,6 +22,7 @@ fn snapshot() -> CollectionSnapshot {
             from: None,
             smooth: false,
         }),
+        opening: false,
         pending: false,
     }
 }

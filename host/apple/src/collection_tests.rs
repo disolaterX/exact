@@ -854,3 +854,64 @@ fn rows_the_data_moves_still_play_their_layout_transition() {
         host.advance(now);
     }
 }
+
+/// A list opening at its end rides none of the moves its rows make while it
+/// opens, a report's or a commit's: they land where the end puts them, as
+/// its corrections do. Once it has opened, a commit's move rides.
+#[test]
+fn a_list_opening_at_its_end_rides_no_move_until_it_has_opened() {
+    let source = r#"
+component App
+  state start = 950
+  resource rows = rows() as shape number[]
+  action older
+    start = start - 50
+  view
+    column
+      button press=older testId="older"
+        text "older"
+      list appearance="none" virtualized=true estimated-item-height=68 scroll-start="end" height=160 width=240 testId="history"
+        for row in rows.slice(start) key=row
+          text `${row}` testId=`row-${row}`
+"#;
+    let (mut bridge, _, _) = fixture(source);
+    let list = snapshot(&bridge).view;
+    let rides = format!("\"rides\":[{list}]");
+    let older = {
+        let kernel = bridge.host.as_ref().unwrap().runner().kernel();
+        kernel
+            .node_by_key(kernel.find_by_test_id("older")[0])
+            .unwrap()
+            .id
+    };
+    let opened = snapshot(&bridge);
+    assert!(opened.opening);
+    let at = opened.correction.expect("the end").offset;
+    let reported = send(&mut bridge, &facts(&opened, at), 0.1);
+    assert!(
+        !reported.contains("\"rides\""),
+        "a report as it opens: {reported}"
+    );
+    let len = bridge.dispatch(older, 0, 0, 0.2);
+    let pressed = String::from_utf8_lossy(bridge.output_bytes(len as usize)).into_owned();
+    assert!(snapshot(&bridge).opening);
+    assert!(!pressed.contains(&rides), "a commit as it opens: {pressed}");
+    // Reports at the end until it has opened
+    for now in 3..=12 {
+        let before = snapshot(&bridge);
+        if !before.opening {
+            break;
+        }
+        let end = before
+            .correction
+            .map_or(before.total_extent - 160., |c| c.offset);
+        send(&mut bridge, &facts(&before, end), f64::from(now) / 10.);
+    }
+    assert!(!snapshot(&bridge).opening);
+    let len = bridge.dispatch(older, 0, 0, 1.5);
+    let pressed = String::from_utf8_lossy(bridge.output_bytes(len as usize)).into_owned();
+    assert!(
+        pressed.contains(&rides),
+        "a commit once it has opened: {pressed}"
+    );
+}

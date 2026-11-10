@@ -654,7 +654,8 @@ impl<D: DataSource> Host<D> {
     /// report, rows mounted or retired, data), or a row wrapper of which
     /// this layout moved or resized (`moved`). Such a list rides the move
     /// (`Batch::rides`) when a runner commit made it and `rides` allows:
-    /// not a resize, which takes places without motion.
+    /// not a resize, which takes places without motion, nor a list still
+    /// opening at its end, whose rows have not yet shown.
     fn measure_collections(
         &mut self,
         moved: &IdSet<ViewId>,
@@ -677,7 +678,7 @@ impl<D: DataSource> Host<D> {
             let mut revision = head.revision;
             self.runner.collection_mounted(list, &mut mounted);
             let moved_row = mounted.iter().any(|(wrapper, _)| moved.contains(wrapper));
-            if rides && moved_row {
+            if rides && moved_row && !head.opening {
                 batch.rides.push(list);
             }
             if self.presence.measured.get(&list) != Some(&revision) || moved_row {

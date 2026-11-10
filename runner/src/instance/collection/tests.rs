@@ -633,6 +633,7 @@ fn snapshot_json_preserves_u64_metadata_as_decimal_strings() {
             from: None,
             smooth: false,
         }),
+        opening: false,
         pending: true,
     };
     let expected = concat!(
