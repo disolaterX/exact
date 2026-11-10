@@ -274,6 +274,9 @@ final class NativeListNavigationIOSTests: XCTestCase {
         let session = try fixture("native-scroll-selection")
         let (nav, route, node) = try second(session)
         let p = session.presenter, automatic = try XCTUnwrap(node.scrollView)
+        // UIKit cannot find the authored scroller through the route's views, so Exact selects it
+        XCTAssertTrue(route.contentScrollView(for: .top) === automatic)
+        let automaticBottom = route.contentScrollView(for: .bottom)
         let firstNative = UIScrollView(frame: route.view.bounds), secondNative = UIScrollView(frame: route.view.bounds)
         firstNative.scrollsToTop = false; secondNative.scrollsToTop = false
         firstNative.contentInsetAdjustmentBehavior = .always
@@ -308,14 +311,16 @@ final class NativeListNavigationIOSTests: XCTestCase {
         XCTAssertTrue(secondNative.scrollsToTop)
         #endif
 
+        // nil is UIKit's automatic selection, which Exact makes for the route's authored scrollers
         route.setContentScrollView(nil, for: .all)
         XCTAssertFalse(firstNative.scrollsToTop)
         XCTAssertFalse(secondNative.scrollsToTop)
         XCTAssertTrue(automatic.scrollsToTop)
+        XCTAssertTrue(route.contentScrollView(for: .top) === automatic, "the bar follows the automatic scroller again")
+        XCTAssertTrue(route.contentScrollView(for: .bottom) === automaticBottom)
         p.navigation.prepareRoutes([route], in: nav)
         XCTAssertEqual(route.projected?.scroll, ObjectIdentifier(automatic))
-        XCTAssertNil(route.contentScrollView(for: .top), "UIKit retains automatic discovery")
-        XCTAssertNil(route.contentScrollView(for: .bottom))
+        XCTAssertTrue(route.contentScrollView(for: .top) === automatic, "and keeps it through layout")
         XCTAssertEqual(firstNative.contentInsetAdjustmentBehavior, .always)
         XCTAssertEqual(secondNative.contentInsetAdjustmentBehavior, .automatic)
 

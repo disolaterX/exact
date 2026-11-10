@@ -6,7 +6,7 @@ task: the UIKit arrangement reference app as an Exact screen
 
 - A pane scroller sized `height="100%"` came out 116 points taller than UIKit's allocation, and its last rows never scrolled into view. The kernel laid a scroller's platform insets (82 under the bar, 34 over the home indicator) out as padding, which a `content-box` height adds to. Fixed in exact2: the insets now come out of the content box, so the box keeps the size its rows give it.
 - Without a height, a pane in native layout took its content's height (11,216 points) and did not scroll. A pane has to fill its allocation to scroll in it.
-- With the safe-area adjustment disabled and no explicit content scroll view, a slow drag in the primary pane leaves the bar expanded; the UIKit reference minimizes it. An explicit primary selection minimizes it in both. Queued.
+- With the safe-area adjustment disabled, a slow drag in the primary pane left the bar expanded where the UIKit reference minimizes it. The cause was the hook's `setContentScrollView(nil, for: .top)` for Automatic, as the reference sets it: Exact took the nil as the app holding the edge with no scroll view, while UIKit's nil is its automatic selection. UIKit cannot find an authored scroller through Exact's views, so Exact makes that selection; fixed in exact2 so a nil returns the edge to it. Any option change had the same effect.
 - The secondary pane's rows run under the open Duo's side strip, where the reference ends them at the pane's safe area. Arranged panes get no side clearance, and Contract cannot read a pane's own safe area yet. Queued.
 - Hatching a pane scroller makes the development log attribute the scroll view's own gesture recognizers to the hatch.
 
@@ -25,7 +25,8 @@ task: the UIKit arrangement reference app as an Exact screen
 ### Checkpoints
 
 - iOS 27.1 Duo simulator, open: Split Automatic, Vertical (UIKit shows the primary pane, as in the reference) and Overlay; Title Display Large; Next seeds the settings and Back keeps each screen's own; each pane scrolls to its last row.
-- Real-touch drags: Automatic minimizes from the primary pane only; Never keeps the bar; Content Scroll View Secondary moves minimization to the secondary pane; Disabled with an explicit primary selection minimizes without moving the other pane.
+- Real-touch drags: Automatic minimizes from the primary pane only; Never keeps the bar; Content Scroll View Secondary moves minimization to the secondary pane; Disabled minimizes without moving the other pane.
+- A copy of the UIKit reference with Exact's containment (the arrangement in a plain route controller, each pane's scroll view inside a holder) minimizes as the reference does, and after Primary then Automatic UIKit observes the primary pane again.
 - Folded at 130° and closed: UIKit's arrangement and Next work; at depth 2 UIKit moves the trailing items into an overflow menu beside Back and the tab bar.
 - Web: the panes sit side by side at 951 points and stack at 420, with only Next; Next and Back work. The tab is last, so the closed Duo's compact tab bar keeps the other tabs where they were.
 - `bun scripts/smoke.mjs duo --only arrangement,lab`: the Panes leg passes; the lab leg fails tapping Reflow after reopening the Duo, as it does on main.

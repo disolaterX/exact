@@ -56,13 +56,13 @@ final class ArrangementOptions {
         if element.hatch == .arrangementPane, panes[element.id] === element { panes[element.id] = nil }
     }
 
-    /// Select the named pane's scroller for the bar, or leave discovery to UIKit when none is named
+    /// Select the named pane's scroller for the bar, or the automatic selection when none is named
     private func select(_ route: ExactRoute) {
         let id = route.data[.contentScroll] ?? ""
         let scroll = id.isEmpty ? nil : panes[id]?.scrollView
         // Select a named pane once its scroller arrives
         if !id.isEmpty, scroll == nil { return }
-        if route.controller.contentScrollView(for: .top) !== scroll { route.controller.setContentScrollView(scroll, for: .top) }
+        route.controller.setContentScrollView(scroll, for: .top)
     }
 }
 #endif

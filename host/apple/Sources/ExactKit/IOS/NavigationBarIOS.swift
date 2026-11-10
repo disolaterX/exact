@@ -876,7 +876,14 @@ extension NavigationHost {
             let adjustment: UIScrollView.ContentInsetAdjustmentBehavior = Self.transparentBar(c.node) ? .never : .automatic
             if sv.contentInsetAdjustmentBehavior != adjustment { sv.contentInsetAdjustmentBehavior = adjustment }
         }
-        guard c.collapseScroll !== target || c.collapseScrollView !== physical else { return }
+        guard c.collapseScroll !== target || c.collapseScrollView !== physical else {
+            // Select it again when the route's selection differs while no native selection holds the
+            // edge (an app gave it back with nil), as `reachBottom` does for the bottom edge
+            if !c.nativeContentScrollEdges.contains(.top), c.contentScrollView(for: .top) !== (physical ?? c.bandedTop) {
+                c.projectContentScrollView(physical ?? c.bandedTop, for: .top)
+            }
+            return
+        }
         let old = c.collapseScroll, oldView = c.collapseScrollView
         if let old, let sv = oldView { old.retainScrollPosition(from: sv) }
         c.collapseScroll = target

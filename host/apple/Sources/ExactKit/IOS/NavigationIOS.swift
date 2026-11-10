@@ -324,7 +324,7 @@ final class RouteController: UIViewController, UIScrollViewDelegate {
     private var projectingContentScrollView = false
     private(set) var nativeContentScrollEdges: NSDirectionalRectEdge = []
     var nativeContentScroller: NodeView? {
-        // UIKit's getter reports explicit selection only; nil keeps automatic scroll targeting.
+        // With no selection for the top edge, the first vertical scroller is the scroll-to-top target
         guard let selected = contentScrollView(for: .top) else { return Presenter.firstVerticalScroller(under: node) }
         var owner = (selected as? Viewport)?.documentNode
         var ancestor = selected.superview
@@ -335,7 +335,11 @@ final class RouteController: UIViewController, UIScrollViewDelegate {
         return owner.flatMap { $0 === node || $0.isDescendant(of: node) ? $0 : nil }
     }
 
-    /// Authored layout supplies defaults; an app's native selection owns that edge, including nil.
+    /// Select Exact's scroller for an edge the app leaves automatic. UIKit
+    /// makes an automatic selection by finding the scroll view itself, and it
+    /// cannot find an authored scroller through the route's views, so Exact's
+    /// selection stands in for it. An app's native selection holds the edge
+    /// until it selects nil, UIKit's automatic selection, again.
     func projectContentScrollView(_ scrollView: UIScrollView?, for edge: NSDirectionalRectEdge) {
         guard nativeContentScrollEdges.intersection(edge).isEmpty else { return }
         projectingContentScrollView = true
@@ -345,6 +349,19 @@ final class RouteController: UIViewController, UIScrollViewDelegate {
 
     // A held stack's tab bar follows the route's scroll views as a navigation controller's follows its top's.
     override func setContentScrollView(_ scrollView: UIScrollView?, for edge: NSDirectionalRectEdge) {
+        if !projectingContentScrollView, scrollView == nil {
+            // An app's nil makes the edges automatic. The top takes the route's authored scroller
+            // now, as scroll-to-top does; the navigation host's next pass refines both edges.
+            nativeContentScrollEdges.subtract(edge)
+            let sides = edge.subtracting([.top, .bottom])
+            if !sides.isEmpty { super.setContentScrollView(nil, for: sides) }
+            if edge.contains(.top) { projectContentScrollView(host.flatMap { $0.shownScroll($0.contentScroller(of: self)) }, for: .top) }
+            if edge.contains(.bottom) { projectContentScrollView(edgeScroll?.scrollView ?? bandedBottom, for: .bottom) }
+            #if os(iOS)
+            if edge.contains(.top) { host?.presenter.syncScrollsToTop() }
+            #endif
+            return
+        }
         if !projectingContentScrollView { nativeContentScrollEdges.formUnion(edge) }
         super.setContentScrollView(scrollView, for: edge)
         (parent as? HeldStack)?.setContentScrollView(scrollView, for: edge)
