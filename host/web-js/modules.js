@@ -158,6 +158,7 @@ export function modules(rows, bound = {}, views = {}, events = {}) {
     const from = sibling(row, row.sub.from), v = from && prefers(from);
     if (v !== undefined) return { now: v };
     if (row.sub.ticket && from) return { hold: "value" };
+    if (row.sub.default != null) return { now: structuredClone(row.sub.default) };
     return { now: { error: "NotSupportedError" } };
   };
   const answer = (row, json) => {

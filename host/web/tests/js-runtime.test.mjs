@@ -1060,6 +1060,15 @@ test('a declared check refuses a send on the JS target, and leaves its state', a
   clock.agent = false;
 });
 
+test('a send with no web implementation answers its substitute default, as the runner does', async () => {
+  const { modules } = await import(resolve(dir, 'modules.js'));
+  const fallback = { token: null, status: 0 };
+  modules({ read: ['key.read', true, { default: fallback }, 'u', 'never', null, false], bare: ['key.bare', true, {}, 'u', 'never', null, false] }, {});
+  const call = send => globalThis.exact.extensions.call({ extension: 'key', send, args: {} });
+  expect(await call('read')).toEqual(fallback);
+  expect(await call('bare')).toEqual({ error: 'NotSupportedError' });
+});
+
 // LLP 1133.004 D6, LLP 1133.002 D12: a module event's origin on the JS target.
 test('a command keeps the origin of the commit that queued it, whenever its tail runs', async () => {
   const { commit, C, Hosts, Origin } = await import(resolve(dir, 'rt.js'));
