@@ -19,7 +19,9 @@ function encode(v, t) {
 export function answers(resources, types, sourceTypes) {
   const out = [];
   resources.forEach((r, i) => {
-    if (r.settled === undefined) return;
+    // A runner's own source (the date, the viewport) is the reader's device: the runtime asks it again, as
+    // `Runner::document_checkpoint` leaves it out.
+    if (r.settled === undefined || r.owned) return;
     const params = sourceTypes[r.source]?.[0] ?? [];
     out.push(`[${JSON.stringify(r.name)},${JSON.stringify(r.source)},[${r.settled.map((a, k) => encode(a, params[k] ?? 's')).join(',')}],${encode(r.value, types[i])}]`);
   });
