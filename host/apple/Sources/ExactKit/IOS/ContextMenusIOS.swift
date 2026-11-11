@@ -38,6 +38,7 @@ final class ContextMenuHost: NSObject, UIContextMenuInteractionDelegate, UIEditM
         weak var source: NodeView?
         weak var popover: NodeView?
         let name: String
+        let sourceIncarnation: UInt64
         let inlineID: UInt32?
         let point: CGPoint
         /// Whether the source's own `contextmenu` has fired (once, lazily).
@@ -45,6 +46,8 @@ final class ContextMenuHost: NSObject, UIContextMenuInteractionDelegate, UIEditM
         var toggled = false
         weak var configuration: UIContextMenuConfiguration?
         weak var interaction: UIContextMenuInteraction?
+        /// Keeps a detached title interaction from falling back to page eligibility.
+        var titleSurface: ObjectIdentifier?
         var keyboardConfiguration: UIEditMenuConfiguration?
         /// The lifted row; the popover it is a row of, the container it
         /// belongs in (its popover's, or another's a children op moved it
@@ -69,6 +72,7 @@ final class ContextMenuHost: NSObject, UIContextMenuInteractionDelegate, UIEditM
         var committed = false, navigated = false
         init(source: NodeView, popover: NodeView, name: String, point: CGPoint, inlineID: UInt32? = nil) {
             self.source = source; self.popover = popover; self.name = name; self.point = point; self.inlineID = inlineID
+            sourceIncarnation = source.incarnation
         }
     }
     private(set) var open: Open?
@@ -95,13 +99,24 @@ final class ContextMenuHost: NSObject, UIContextMenuInteractionDelegate, UIEditM
     }
 
     func syncProjected(_ view: UIView & GroupedMenuSurface) {
+        syncProjected(view, source: view.menuSource)
+    }
+    func syncTitle(_ view: HeaderTitleView) {
+        syncProjected(view, source: view.menuSource)
+    }
+    private func projectedSource(_ view: UIView) -> NodeView? {
+        if let title = view as? HeaderTitleView { return title.menuSource }
+        return (view as? GroupedMenuSurface)?.menuSource
+    }
+    private func syncProjected(_ view: UIView, source: NodeView?) {
         let key = ObjectIdentifier(view)
-        if let owner = open, owner.interaction?.view === view, owner.source !== view.menuSource {
+        if let owner = open, owner.interaction?.view === view,
+           owner.source !== source || source?.incarnation != owner.sourceIncarnation {
             owner.interaction?.dismissMenu()
             restore(owner)
             open = nil
         }
-        let wanted = !ExactEnv.agentPaints && view.menuSource?.props["contextPopover"]?.isEmpty == false
+        let wanted = !ExactEnv.agentPaints && source?.props["contextPopover"]?.isEmpty == false
         if wanted, projected[key] == nil {
             let interaction = UIContextMenuInteraction(delegate: self)
             let before = companions(of: view)
@@ -123,7 +138,8 @@ final class ContextMenuHost: NSObject, UIContextMenuInteractionDelegate, UIEditM
         // goes back now, as `willEnd` may never come for it. A commit's
         // animation still holds the row; its `willEnd` returns it.
         if let owner = open, !owner.committed,
-           !(owner.source.map { live($0) && contextName(owner) == owner.name } ?? false)
+           !(owner.source.map { live($0) && $0.incarnation == owner.sourceIncarnation && contextName(owner) == owner.name } ?? false)
+            || owner.titleSurface != nil && current(owner) == nil
             || owner.keyboardConfiguration != nil && current(owner) == nil {
             open = nil
             owner.interaction?.dismissMenu()
@@ -137,7 +153,7 @@ final class ContextMenuHost: NSObject, UIContextMenuInteractionDelegate, UIEditM
             for v in presenter.carrying("contextPopover") where v.props["contextPopover"]?.isEmpty == false { wanted[v.id] = v }
         }
         for (key, interaction) in projected {
-            if let view = interaction.view as? (UIView & GroupedMenuSurface) { syncProjected(view) }
+            if let view = interaction.view { syncProjected(view, source: projectedSource(view)) }
             else { projected[key] = nil; recognizers[ObjectIdentifier(interaction)] = nil }
         }
         syncMounts(presenter, sources: Array(wanted.values))
@@ -188,7 +204,7 @@ final class ContextMenuHost: NSObject, UIContextMenuInteractionDelegate, UIEditM
         owner.home = Self.box(node)
         place(owner)
     }
-    /// A view's layout box in its parent, untransformed.
+    /// The untransformed native frame saved for the lifted view's return.
     private static func box(_ view: UIView) -> CGRect {
         CGRect(x: view.center.x - view.bounds.width / 2, y: view.center.y - view.bounds.height / 2,
                width: view.bounds.width, height: view.bounds.height)
@@ -261,7 +277,8 @@ final class ContextMenuHost: NSObject, UIContextMenuInteractionDelegate, UIEditM
     private func fire(_ owner: Open) {
         guard !owner.fired else { return }
         owner.fired = true
-        guard let source = owner.source, live(source), !source.formDisabled else { return }
+        guard let source = owner.source, live(source), source.incarnation == owner.sourceIncarnation, !source.formDisabled else { return }
+        if owner.titleSurface != nil, current(owner) == nil { return }
         source.deliverContext(at: owner.point, inline: owner.inlineID)
     }
     private func contextName(_ owner: Open) -> String? {
@@ -275,13 +292,18 @@ final class ContextMenuHost: NSObject, UIContextMenuInteractionDelegate, UIEditM
 
     /// The popover as it is now, if its source still names it.
     private func current(_ owner: Open) -> NodeView? {
+        if owner.titleSurface != nil, open !== owner || owner.touched == nil { return nil }
         // A cell may have been reused while UIKit still holds its menu.
-        if let cell = owner.interaction?.view as? GroupedMenuSurface, cell.menuSource !== owner.source { return nil }
+        if let view = owner.interaction?.view, !(view is NodeView), !(view is PresentationMount), projectedSource(view) !== owner.source { return nil }
         // Its own action, which has run, may have disabled, hidden or moved it.
-        guard let source = owner.source, live(source), contextName(owner) == owner.name,
-              menus?.eligible(source, contextMenu: true) == true, let pop = popover(named: owner.name) else { return nil }
+        guard let source = owner.source, live(source), source.incarnation == owner.sourceIncarnation, contextName(owner) == owner.name,
+              eligible(source, titleSurface: owner.titleSurface), let pop = popover(named: owner.name) else { return nil }
         owner.popover = pop
         return pop
+    }
+    private func eligible(_ source: NodeView, titleSurface: ObjectIdentifier?) -> Bool {
+        if let titleSurface, source.inert || presenter?.navigation.projectedTitle(for: source).map(ObjectIdentifier.init) != titleSurface { return false }
+        return menus?.eligible(source, contextMenu: true, inBar: titleSurface != nil) == true
     }
     private func log(_ line: String) { presenter?.session?.log(line) }
 
@@ -310,16 +332,22 @@ final class ContextMenuHost: NSObject, UIContextMenuInteractionDelegate, UIEditM
         let source: NodeView, point: CGPoint, hit: UIView?
         if let node = view as? NodeView {
             source = node; point = location; hit = node.hitTest(location, with: nil)
-        } else if let cell = view as? (UIView & GroupedMenuSurface), let found = cell.menuSource {
-            source = found; point = location; hit = cell
+        } else if let found = projectedSource(view) {
+            source = found; point = view is HeaderTitleView ? found.convert(location, from: view) : location; hit = view
         } else if let mount = view as? PresentationMount, let found = mount.relay?.listener(mount.hitTest(location, with: nil), contextMenu: true, { $0.props["contextPopover"]?.isEmpty == false }) {
             // A sheet's mount: its route's nearest logical ancestor with a
             // menu, unless a node in the sheet is nearer (`MountRelay`)
             source = found; point = mount.convert(location, to: found); hit = mount.hitTest(location, with: nil)
         } else { return nil }
+        let titleSurface = (view as? HeaderTitleView).map(ObjectIdentifier.init)
         let run = source.inlineContextTarget(at: point)
         guard live(source), let name = run?.props["contextPopover"] ?? (run == nil ? source.props["contextPopover"] : nil),
-              menus.eligible(source, contextMenu: true) else { return nil }
+              eligible(source, titleSurface: titleSurface) else { return nil }
+        if let title = view as? HeaderTitleView {
+            guard title.bounds.contains(location), let window = title.window,
+                  let shown = window.hitTest(title.convert(location, to: window), with: nil),
+                  shown === title || shown.isDescendant(of: title) else { return nil }
+        }
         // UIKit's row menu wins over text selection. An authored menu
         // nearer the hit still belongs to that node (LLP 1115.000 D11.6).
         if view is NodeView ? NodeView.nativeEditor(hit, below: view) : NodeView.nativeInputOwns(hit, below: view) { return nil }
@@ -330,6 +358,7 @@ final class ContextMenuHost: NSObject, UIContextMenuInteractionDelegate, UIEditM
         if let previous = open { restore(previous) }
         let owner = Open(source: source, popover: pop, name: name, point: point, inlineID: run?.id)
         owner.interaction = interaction
+        owner.titleSurface = titleSurface
         if !(view is NodeView) { owner.touched = hit }
         open = owner
         // A run's picture as the finger lands: UIKit asks for the configuration
@@ -407,9 +436,9 @@ final class ContextMenuHost: NSObject, UIContextMenuInteractionDelegate, UIEditM
     /// leaves UIKit's own (the lifted node) as the preview.
     func lift(_ owner: Open) -> UIViewController? {
         fire(owner)
+        guard let pop = current(owner) else { return nil }
         // Asked again, the same controller: the row is already in it.
         if owner.preview != nil, let controller = owner.controller { return controller }
-        guard let pop = current(owner) else { return nil }
         // Laid out first: a closed popover has no box (`MenuHost.layOut`).
         menus?.layOut(pop)
         let rows = pop.container.subviews.compactMap { $0 as? NodeView }.filter { $0.props["contextPreview"] == "true" }
@@ -457,12 +486,16 @@ final class ContextMenuHost: NSObject, UIContextMenuInteractionDelegate, UIEditM
     }
 
     /// UIKit lifts the node itself, live, clipped to its outline (LLP 1021
-    /// §5.1): it hides the node, lifts it and returns it. A run of text cannot
-    /// lift its paragraph, which UIKit would hide whole: it lifts a picture of
-    /// what lies under the run's lines (`runPreview`), and the paragraph stays
-    /// shown. Both rise over `container(of:)`.
+    /// §5.1): it hides the node, lifts it and returns it, or the list cell
+    /// that draws it, in its background's shape (`cell(drawing:)`), or a node
+    /// painting no ground of its own in the grounds the nodes inside it paint
+    /// (`grounds(in:)`). A run of text cannot lift its paragraph, which UIKit
+    /// would hide whole: it lifts a picture of what lies under the run's lines
+    /// (`runPreview`), and the paragraph stays shown. All rise over `container(of:)`.
     private func targeted(_ configuration: UIContextMenuConfiguration) -> UITargetedPreview? {
         guard let owner = open, let source = owner.source, live(source),
+              owner.configuration === configuration,
+              owner.titleSurface == nil || current(owner) != nil,
               (configuration.identifier as? NSNumber)?.uint32Value == (owner.inlineID ?? source.id) else { return nil }
         if let id = owner.inlineID {
             // Nil where the run no longer shows lines, its text gone
@@ -474,11 +507,38 @@ final class ContextMenuHost: NSObject, UIContextMenuInteractionDelegate, UIEditM
             return preview.retargetedPreview(with: lines.target)
         }
         // A view the touch fell on that has left the window gives way to the node
-        let shown = owner.touched.flatMap { $0.window == nil ? nil : $0 } ?? source
+        var shown: UIView = owner.touched.flatMap { $0.window == nil ? nil : $0 } ?? source
         let parameters = UIPreviewParameters()
-        parameters.visiblePath = Self.rounded(shown)
-        guard let target = Self.target(shown) else { return nil }
+        if let title = shown as? HeaderTitleView, let face = title.avatarFace, !hasPreview(owner) {
+            shown = title.avatar
+            parameters.visiblePath = UIBezierPath(cgPath: BorderPaint.roundedRect(shown.bounds, face.corners, shape: nil))
+            parameters.backgroundColor = .clear
+        } else if let cell = Self.cell(drawing: shown), let background = cell.backgroundConfiguration {
+            // A row a list's cell draws lifts as UIKit lifts the cells it draws
+            // itself: the cell, its ground included (selected, highlighted or the
+            // card's), in its background's shape, one radius UIKit keeps through
+            // the morph as it keeps `rounded`'s.
+            shown = cell
+            parameters.visiblePath = Self.shape(of: background, in: cell)
+        } else {
+            parameters.visiblePath = Self.rounded(shown)
+        }
+        // A node that paints no ground, whose text and images lie on the
+        // grounds the nodes inside it paint, lifts in their shape: a chat
+        // balloon, its body and its tail, as the platform lifts its own.
+        // Only where UIKit would otherwise lift the bare box: a rounded node
+        // keeps `rounded`'s outline, which UIKit keeps through the morph.
+        if parameters.visiblePath == nil, let node = shown as? NodeView, !Self.paintsGround(node), let grounds = Self.grounds(in: node) {
+            parameters.visiblePath = grounds
+        }
+        guard let target = Self.target(shown, showing: parameters.visiblePath?.bounds) else { return nil }
         return UITargetedPreview(view: shown, parameters: parameters, target: target)
+    }
+
+    /// A lifted row has left the popover but still owns its explicit preview.
+    private func hasPreview(_ owner: Open) -> Bool {
+        if owner.preview != nil { return true }
+        return current(owner)?.container.subviews.contains { ($0 as? NodeView)?.props["contextPreview"] == "true" && !$0.isHidden } == true
     }
 
     /// `view`'s outline in its own coordinates where its corners are rounded,
@@ -497,6 +557,140 @@ final class ContextMenuHost: NSObject, UIContextMenuInteractionDelegate, UIEditM
             return UIBezierPath(roundedRect: node.bounds, cornerRadius: corner.width)
         }
         return corners.contains(where: { $0.width > 0 }) ? node.roundedPath(in: node.bounds) : nil
+    }
+
+    /// The list cell drawing `view`: the cell itself, or the cell whose content view carries it.
+    private static func cell(drawing view: UIView) -> UICollectionViewCell? {
+        if let cell = view as? UICollectionViewCell { return cell }
+        guard let content = view.superview, let cell = content.superview as? UICollectionViewCell, cell.contentView === content else { return nil }
+        return cell
+    }
+    /// A cell's background as its configuration draws it: the cell's bounds
+    /// less the configuration's insets, with its corner radius.
+    private static func shape(of background: UIBackgroundConfiguration, in cell: UICollectionViewCell) -> UIBezierPath {
+        var insets = background.backgroundInsets
+        let margins = cell.directionalLayoutMargins, edges = background.edgesAddingLayoutMarginsToBackgroundInsets
+        if edges.contains(.top) { insets.top += margins.top }
+        if edges.contains(.leading) { insets.leading += margins.leading }
+        if edges.contains(.bottom) { insets.bottom += margins.bottom }
+        if edges.contains(.trailing) { insets.trailing += margins.trailing }
+        let rtl = cell.effectiveUserInterfaceLayoutDirection == .rightToLeft
+        let box = cell.bounds.inset(by: UIEdgeInsets(top: insets.top, left: rtl ? insets.trailing : insets.leading, bottom: insets.bottom, right: rtl ? insets.leading : insets.trailing))
+        return UIBezierPath(roundedRect: box, cornerRadius: background.cornerRadius)
+    }
+
+    /// The grounds the nodes inside `view` paint, in `view`'s space, joined
+    /// into one region: each where it paints, its box in its corners, cut by
+    /// its clip path and by every box above it that clips (a clip path's
+    /// points beyond the box paint nothing, and a box of no area paints
+    /// nothing). Nil when none paints one, when one is masked by what is not
+    /// a region (a gradient, a filter's picture, a transition's surface),
+    /// itself or by a box above it, or when ink lies
+    /// anywhere off them: a node that paints none and holds none (a
+    /// paragraph, an image, a drawing) or a flat box drawn in a layer
+    /// (`FlatLeaves`), each by its whole box, or a flat box's shadow. A line
+    /// centred on a balloon's body that runs past it lifts the whole box, as
+    /// before, so no ink of it is cut.
+    ///
+    /// The union decides; the path given is the grounds' own outlines, each
+    /// normalized (`CGPath.normalized`: weakly simple, no self-intersection,
+    /// the orientation every normalized path has) and added as a subpath, so
+    /// the nonzero rule fills their union with the authored edges. The
+    /// union's own path does not keep them: its boolean cuts move a corner's
+    /// point by 1e-8 pt, enough to lose a ground pixel whose centre lies on it.
+    private static func grounds(in view: NodeView) -> UIBezierPath? {
+        var shape: CGPath?
+        let outlines = CGMutablePath()
+        var content: [CGRect] = []
+        // Each view, with the region the boxes from `view` down to it clip
+        // it to, and whether one of them, or it, is masked otherwise
+        var stack: [(UIView, CGPath?, Bool)] = [(view, nil, false)]
+        while let entry = stack.popLast() {
+            let (sub, above, maskedAbove) = entry
+            guard !sub.isHidden, sub.alpha > 0.01 else { continue }
+            let node = sub as? NodeView
+            // What it clips what it holds to: its box in its corners when it
+            // clips its overflow, and its clip path, both where both are there
+            // (`BoxMaskIOS.clipMask`)
+            var own: CGPath?
+            if sub.clipsToBounds { own = (node?.roundedPath(in: sub.bounds) ?? UIBezierPath(roundedRect: sub.bounds, cornerRadius: sub.layer.cornerRadius)).cgPath }
+            if let node, let path = node.clipPath {
+                let authored = path.normalized(using: node.clipRule)
+                own = own.map { $0.intersection(authored) } ?? authored
+            }
+            // A mask no region says: `mask-image`, laid over the clip path
+            // (`composedMask`), a filtered box's picture, a layout transition's
+            // surface, a node's mask that is neither of its clips, or any mask
+            // on a view that is not a node (a clip box's shaped corners)
+            let unsaid = node.map { $0.style["mask_image"] != nil || $0.hasBoxFilter || $0.surface != nil || ($0.layer.mask != nil && $0.clipPath == nil && !$0.clipsToBounds) }
+                ?? (sub.layer.mask != nil)
+            let masked = maskedAbove || unsaid
+            var clip = above
+            if let own {
+                let mine = placed(own, transform(from: sub, to: view))
+                clip = above.map { $0.intersection(mine) } ?? mine
+            }
+            stack.append(contentsOf: sub.subviews.map { ($0, clip, masked) })
+            guard let node else { continue }
+            // An outer shadow (`applyShadow`, cast on the node's layer past its
+            // box) or a filter's picture paints past the box: no shape of the
+            // grounds holds that ink, so the whole box lifts
+            if node !== view, node.shadowCaster != nil || node.hasBoxFilter { return nil }
+            guard let flat = flatBoxes(drawnIn: node, in: view) else { return nil }
+            content += flat
+            guard node !== view else { continue }
+            if paintsGround(node) {
+                guard !masked else { return nil }
+                guard !node.bounds.isEmpty else { continue }
+                let box = placed(node.roundedPath(in: node.bounds).cgPath, transform(from: node, to: view))
+                let painted = clip.map { box.intersection($0) } ?? box
+                // The union of the regions, whichever way each path turns
+                shape = shape.map { $0.union(painted) } ?? painted
+                // Its outline as authored where that is what paints: the clip
+                // path itself when nothing above clips and it lies in a
+                // square-cornered box (the box cut by it is it); else the cut
+                if above == nil, let path = node.clipPath, node.cornerSizes(in: node.bounds).allSatisfy({ $0 == .zero }),
+                   node.bounds.contains(path.boundingBoxOfPath) {
+                    outlines.addPath(placed(path, transform(from: node, to: view)).normalized(using: node.clipRule))
+                } else {
+                    outlines.addPath(painted.normalized())
+                }
+            } else if !node.bounds.isEmpty, !node.subviews.contains(where: { $0 is NodeView }) {
+                content.append(view.convert(node.bounds, from: node))
+            }
+        }
+        guard let shape, !shape.isEmpty, !shape.boundingBoxOfPath.isEmpty,
+              content.allSatisfy({ CGPath(rect: $0, transform: nil).subtracting(shape).isEmpty }) else { return nil }
+        return UIBezierPath(cgPath: outlines)
+    }
+    /// The boxes of the flat leaves `node` draws in its layers, in `view`'s
+    /// space; nil when one casts a shadow, whose ink lies outside its box.
+    private static func flatBoxes(drawnIn node: NodeView, in view: UIView) -> [CGRect]? {
+        guard let flats = node.presenter?.flats, var ids = flats.children(of: node.id) else { return [] }
+        var boxes: [CGRect] = []
+        while let id = ids.popLast() {
+            guard let leaf = flats.leaves[id] else { continue }
+            ids.append(contentsOf: flats.children(of: id) ?? [])
+            guard let frame = flats.frameInHost(id), !frame.isEmpty else { continue }
+            if leaf.paint.shadow != nil { return nil }
+            boxes.append(view.convert(frame, from: node.container))
+        }
+        return boxes
+    }
+    /// `sub`'s space mapped into `view`'s, through every transform between them.
+    private static func transform(from sub: UIView, to view: UIView) -> CGAffineTransform {
+        let origin = view.convert(CGPoint.zero, from: sub), x = view.convert(CGPoint(x: 1, y: 0), from: sub), y = view.convert(CGPoint(x: 0, y: 1), from: sub)
+        return CGAffineTransform(a: x.x - origin.x, b: x.y - origin.y, c: y.x - origin.x, d: y.y - origin.y, tx: origin.x, ty: origin.y)
+    }
+    private static func placed(_ path: CGPath, _ transform: CGAffineTransform) -> CGPath {
+        let out = CGMutablePath()
+        out.addPath(path, transform: transform)
+        return out
+    }
+    /// Whether `node` paints a ground: a background colour, a gradient, a material or a border.
+    private static func paintsGround(_ node: NodeView) -> Bool {
+        (node.cgColor("background_color")?.alpha ?? 0) > 0 || node.style["background_image"] != nil || node.materialView != nil
+            || ["border_width", "border_width_top", "border_width_right", "border_width_bottom", "border_width_left"].contains { node.number($0) > 0 }
     }
 
     /// A run's lines where the screen shows them in `container`: their boxes,
@@ -1082,7 +1276,12 @@ final class ContextMenuHost: NSObject, UIContextMenuInteractionDelegate, UIEditM
     /// UIKit's own target for a view carries it (`UITargetedPreview(view:parameters:)`),
     /// and each ancestor's scale and rotation; converting the center takes the
     /// translations.
-    private static func target(_ view: UIView) -> UIPreviewTarget? {
+    /// Where UIKit places the preview: the centre of what it shows (`visible`,
+    /// the preview's outline in `view`'s space, else its bounds), as it was,
+    /// so the lift starts where the node shows. UIKit centres the outline's
+    /// box there, not the view's: a balloon whose tail reaches below its box
+    /// rose by half the tail's depth.
+    private static func target(_ view: UIView, showing visible: CGRect? = nil) -> UIPreviewTarget? {
         guard let container = container(of: view), let parent = view.superview else { return nil }
         var transform = view.transform
         for ancestor in sequence(first: parent, next: { $0.superview }) {
@@ -1092,7 +1291,8 @@ final class ContextMenuHost: NSObject, UIContextMenuInteractionDelegate, UIEditM
         }
         transform.tx = 0
         transform.ty = 0
-        return UIPreviewTarget(container: container, center: view.convert(CGPoint(x: view.bounds.midX, y: view.bounds.midY), to: container), transform: transform)
+        let shown = visible.flatMap { $0.isEmpty || $0.isNull ? nil : $0 } ?? view.bounds
+        return UIPreviewTarget(container: container, center: view.convert(CGPoint(x: shown.midX, y: shown.midY), to: container), transform: transform)
     }
 
     func contextMenuInteraction(_ interaction: UIContextMenuInteraction, configuration: UIContextMenuConfiguration, highlightPreviewForItemWithIdentifier identifier: NSCopying) -> UITargetedPreview? {
@@ -1108,10 +1308,10 @@ final class ContextMenuHost: NSObject, UIContextMenuInteractionDelegate, UIEditM
         animator.preferredCommitStyle = .dismiss
         // The row still a row of the popover its source names, pressable and
         // enabled where it is authored (it is not in that tree while lifted).
-        guard let owner = open, let presenter, let row = owner.preview, live(row), row.handlers.contains("press"),
+        guard let owner = open, owner.configuration === configuration, let presenter, let row = owner.preview, live(row), row.handlers.contains("press"),
               let pop = owner.homePopover, live(pop), current(owner) === pop, !owner.dropped,
               owner.inPopover,
-              let source = owner.source, committable(row, in: pop, from: source) else { return }
+              let source = owner.source, committable(row, in: pop, from: source, titleSurface: owner.titleSurface) else { return }
         owner.committed = true
         let before = presenter.navigation.activeKey
         // Held until the stack has applied it: a push deferred behind a
@@ -1150,8 +1350,8 @@ final class ContextMenuHost: NSObject, UIContextMenuInteractionDelegate, UIEditM
     /// reads it but for the popover's own hiding: nothing disabled, inert or
     /// hidden (the row itself included), in the active route, and the source
     /// still eligible.
-    private func committable(_ row: NodeView, in pop: NodeView, from source: NodeView) -> Bool {
-        guard let presenter, let menus, !row.disabled, !row.isHidden, row.props["inert"] != "true", menus.eligible(source, contextMenu: true),
+    private func committable(_ row: NodeView, in pop: NodeView, from source: NodeView, titleSurface: ObjectIdentifier?) -> Bool {
+        guard let presenter, !row.disabled, !row.isHidden, row.props["inert"] != "true", eligible(source, titleSurface: titleSurface),
               !presenter.navigation.isInactiveRoute(containing: pop) else { return false }
         var view: UIView? = pop
         while let current = view {

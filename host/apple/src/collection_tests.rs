@@ -96,6 +96,66 @@ fn state(bridge: &Bridge<Rows>) -> (String, String, f64, f64) {
 }
 
 #[test]
+fn collection_boot_and_carried_boot_fill_the_supplied_viewport_in_the_first_batch() {
+    let source = r#"component App
+  view
+    list appearance="none" virtualized=true estimated-item-height=100 scroll-start="end" width="100%" height="100%"
+      for row in range(1000) key=row
+        text `${row}` height=100
+"#;
+    let plan = contract::compile(source).unwrap().encode();
+    let boot = |height| {
+        Host::boot(
+            &plan,
+            (),
+            Box::new(MonospaceMeasurer::default()),
+            200.,
+            height,
+        )
+        .unwrap()
+    };
+    let (small, small_batch) = boot(300.);
+    let (large, large_batch) = boot(900.);
+    let (replacement, replacement_batch) = Host::boot_with(
+        &plan,
+        (),
+        Box::new(MonospaceMeasurer::default()),
+        200.,
+        450.,
+        Some(&large.carry()),
+    )
+    .unwrap();
+    for (host, batch, count) in [
+        (&small, small_batch, 3),
+        (&large, large_batch, 9),
+        (&replacement, replacement_batch, 5),
+    ] {
+        assert_eq!(host.runner().kernel().epoch(), 1);
+        let snapshot = host.runner().collections().remove(0);
+        assert_eq!(snapshot.rows.len(), count);
+        assert_eq!(snapshot.rows[0].index, 1000 - count);
+        assert_eq!(snapshot.rows.last().unwrap().index, 999);
+        assert!(snapshot
+            .rows
+            .iter()
+            .all(|row| { host.runner().kernel().node(row.view).unwrap().frame.height == 100. }));
+        let envelope: serde_json::Value = serde_json::from_str(&batch).unwrap();
+        assert!(envelope["error"].is_null(), "{batch}");
+        let collections = envelope["ops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|op| op["op"] == "collections")
+            .collect::<Vec<_>>();
+        assert_eq!(collections.len(), 1);
+        assert_eq!(
+            collections[0]["items"][0]["rows"].as_array().unwrap().len(),
+            count
+        );
+    }
+}
+
+#[test]
 fn collection_feedback_submits_edge_request_without_another_bridge_call() {
     use exact_runner::{Answer, Outcome, Request, Store};
     use std::sync::mpsc::{channel, Sender};
@@ -209,14 +269,199 @@ fn collection_boot_uses_common_json_after_frames_and_ticks_do_not_emit_it() {
     assert_eq!(queries.get(), queries_before);
 }
 
+/// Each mounted row of `snapshot` starts where the layout put it in its list.
+fn assert_rows_where_laid_out(bridge: &Bridge<Rows>, snapshot: &CollectionSnapshot) {
+    let kernel = bridge.host.as_ref().unwrap().runner().kernel();
+    let list = kernel.node(snapshot.view).unwrap().frame;
+    for row in &snapshot.rows {
+        let laid = kernel.node(row.view).unwrap().frame;
+        assert!(row.measured, "{row:?}");
+        assert!(
+            (f64::from(laid.y - list.y) - row.start).abs() < 0.01,
+            "{row:?} laid out at {laid:?} in a list at {list:?}"
+        );
+    }
+}
+
+/// LLP 1072 §8.7: the batch that lays rows out at sizes other than the
+/// list's estimate carries those sizes, so a list opening at its end is told
+/// the end they make in that batch, not after the presenter's next report.
+#[test]
+fn a_batch_that_lays_rows_out_carries_the_end_their_sizes_make() {
+    let source = SOURCE.replace(
+        "list virtualized=true",
+        "list virtualized=true scroll-start=\"end\" estimated-item-height=40",
+    );
+    let (mut bridge, _, _) = fixture(&source);
+    let opened = snapshot(&bridge);
+    let end = opened.correction.expect("told to start at the end").offset;
+    let batch = send(&mut bridge, &facts(&opened, end), 1.);
+    assert!(batch.contains("\"error\":null"), "{batch}");
+    let after = snapshot(&bridge);
+    assert_rows_where_laid_out(&bridge, &after);
+    // The port's 160 points end at the rows' end
+    let correction = after.correction.expect("the end the sizes make");
+    assert!(
+        (correction.offset - (after.total_extent - 160.)).abs() < 0.01,
+        "{correction:?} for an extent of {}",
+        after.total_extent
+    );
+    assert!(
+        correction.from.is_none(),
+        "an end is absolute: {correction:?}"
+    );
+}
+
+/// The same for a row the reader is at: rows mounted above it at their own
+/// sizes move it in the layout, and the batch's correction keeps it at the
+/// port's top, relative to where the port was.
+#[test]
+fn a_batch_that_lays_rows_out_above_the_anchor_keeps_it_in_place() {
+    let source = SOURCE.replace(
+        "list virtualized=true",
+        "list virtualized=true estimated-item-height=40",
+    );
+    let (mut bridge, _, _) = fixture(&source);
+    // Row 400 at the port's top by the estimate
+    let report = facts(&snapshot(&bridge), 16_000.);
+    let batch = send(&mut bridge, &report, 1.);
+    assert!(batch.contains("\"error\":null"), "{batch}");
+    let after = snapshot(&bridge);
+    assert_rows_where_laid_out(&bridge, &after);
+    let anchor = after
+        .rows
+        .iter()
+        .find(|row| row.index == 400)
+        .expect("row 400 mounted");
+    assert!(
+        after.rows.iter().any(|row| row.index < 400),
+        "rows mounted above it"
+    );
+    let correction = after.correction.expect("the anchor's correction");
+    assert!(
+        (correction.offset - anchor.start).abs() < 0.01,
+        "{correction:?} for row 400 at {}",
+        anchor.start
+    );
+    assert_eq!(
+        correction.from,
+        Some(16_000.),
+        "relative to where the port was"
+    );
+}
+
+/// The same for a row a commit adds and takes into view (a sent message
+/// at a followed end): the batch aims at the end the row's laid-out size
+/// makes, not its estimate, which the presenter would scroll to first and
+/// then come back from on the next report.
+#[test]
+fn a_batch_that_lays_a_row_out_aims_its_scroll_into_view_at_its_size() {
+    let source = SOURCE
+        .replace(
+            "action toggle",
+            "state count = 30\n  action add\n    let n = count\n    count = n + 1\n    scrollIntoView(\"history\", n, block=\"end\")\n  action toggle",
+        )
+        .replace(
+            "      if showing\n",
+            "      button press=add testId=\"add\"\n        text \"add\"\n      if showing\n",
+        )
+        .replace(
+            "list virtualized=true",
+            "list id=\"history\" virtualized=true scroll-start=\"end\" estimated-item-height=40",
+        )
+        .replace("for row in rows key=row", "for row in range(count) key=row");
+    let (mut bridge, _, _) = fixture(&source);
+    // Reports until the window rests at the end
+    let mut top = 0.;
+    for now in 1..=8 {
+        let before = snapshot(&bridge);
+        top = before.correction.map_or(top, |c| c.offset);
+        send(&mut bridge, &facts(&before, top), f64::from(now) / 10.);
+        if snapshot(&bridge).revision == before.revision {
+            break;
+        }
+    }
+    let host = bridge.host.as_ref().unwrap();
+    let kernel = host.runner().kernel();
+    let add = kernel
+        .node_by_key(kernel.find_by_test_id("add")[0])
+        .unwrap()
+        .id;
+    let len = bridge.dispatch(add, 0, 0, 1.);
+    let added = String::from_utf8_lossy(bridge.output_bytes(len as usize)).into_owned();
+    assert!(added.contains("\"error\":null"), "{added}");
+    let after = snapshot(&bridge);
+    assert_eq!(after.count, 31);
+    assert_eq!(after.rows.last().map(|r| r.index), Some(30), "{after:?}");
+    assert_rows_where_laid_out(&bridge, &after);
+    let correction = after.correction.expect("the new row's end");
+    assert!(
+        (correction.offset - (after.total_extent - 160.)).abs() < 0.01,
+        "{correction:?} for an extent of {}",
+        after.total_extent
+    );
+}
+
+/// A commit that moves a list's rows has the presenter ride the move
+/// (`"rides"`), as a collection view's batch update moves its cells; a
+/// report that moves nothing and a resize, which takes places without
+/// motion, do not.
+#[test]
+fn a_commit_that_moves_a_lists_rows_has_them_ride_the_move() {
+    let source = SOURCE
+        .replace("action toggle", "state tall = false\n  action grow\n    tall = true\n  action toggle")
+        .replace(
+            "      if showing\n",
+            "      button press=grow testId=\"grow\"\n        text \"grow\"\n      if showing\n",
+        )
+        .replace(
+            "            text `${row}` testId=`row-${row}`",
+            "            column height=(tall and row == 0 ? 80 : 20)\n              text `${row}` testId=`row-${row}`",
+        );
+    let (mut bridge, _, _) = fixture(&source);
+    let list = snapshot(&bridge).view;
+    let rides = format!("\"rides\":[{list}]");
+    // Reports until the window rests: the last one moves no row
+    let mut rested = String::new();
+    for now in 1..=8 {
+        let before = snapshot(&bridge);
+        rested = send(&mut bridge, &facts(&before, 0.), f64::from(now) / 10.);
+        if snapshot(&bridge).revision == before.revision {
+            break;
+        }
+    }
+    assert!(!rested.contains("\"rides\""), "nothing moved: {rested}");
+    let host = bridge.host.as_ref().unwrap();
+    let kernel = host.runner().kernel();
+    let grow = kernel
+        .node_by_key(kernel.find_by_test_id("grow")[0])
+        .unwrap()
+        .id;
+    let len = bridge.dispatch(grow, 0, 0, 3.);
+    let grown = String::from_utf8_lossy(bridge.output_bytes(len as usize)).into_owned();
+    assert!(grown.contains(&rides), "the first row grew: {grown}");
+    let len = bridge.resize(400., 600.);
+    let resized = String::from_utf8_lossy(bridge.output_bytes(len as usize)).into_owned();
+    assert!(!resized.contains("\"rides\""), "{resized}");
+}
+
 #[test]
 fn a_sequence_only_report_does_not_resend_collections_on_a_scroll_commit() {
     let source = SOURCE.replace("action toggle", "state scrolled = 0\n  action scroll(left: number, top: number)\n    scrolled = scrolled + 1\n  action toggle")
         .replace("list virtualized=true", "list scroll=scroll virtualized=true");
     let (mut bridge, _, _) = fixture(&source);
-    let initial = snapshot(&bridge);
-    send(&mut bridge, &facts(&initial, 0.), 1.);
-    let before = snapshot(&bridge);
+    // Reports until the window rests: each measures the rows it mounts, and
+    // rows shorter than the estimate leave the window more rows to build
+    let mut before = snapshot(&bridge);
+    for now in 1..=8 {
+        send(&mut bridge, &facts(&before, 0.), f64::from(now) / 10.);
+        let next = snapshot(&bridge);
+        let rested = next.revision == before.revision;
+        before = next;
+        if rested {
+            break;
+        }
+    }
     let report = facts(&before, 0.);
     send(&mut bridge, &report, 2.);
     let after = snapshot(&bridge);
@@ -253,18 +498,24 @@ fn collection_scroll_and_measurements_commit_without_requerying_resources() {
     assert!(host.runner().kernel().find_by_test_id("row-0").is_empty());
     assert_eq!(host.runner().last_instance_work().rows_keyed, 0);
     assert_eq!(host.engine().now(), 0.01);
+    // The batch that laid the rows out measured them at those sizes
+    let row = &after.rows[0];
+    let laid = host.runner().kernel().node(row.view).unwrap().frame.height;
+    assert!(row.measured, "{row:?}");
+    assert!(
+        (row.size - f64::from(laid)).abs() < 1e-4,
+        "{row:?} laid out at {laid}"
+    );
+    // The presenter's report of that size, as it reads it, changes nothing
     let mut measurement = facts(&after, 16_000.);
     measurement.measurements.push(RowMeasurement {
-        view: after.rows[0].view,
-        epoch: after.rows[0].epoch,
-        size: 43.,
+        view: row.view,
+        epoch: row.epoch,
+        size: row.size,
     });
     let batch = send(&mut bridge, &measurement, 20.);
     assert!(batch.contains("\"error\":null"), "{batch}");
-    assert!(snapshot(&bridge)
-        .rows
-        .iter()
-        .any(|row| row.size == 43. && row.measured));
+    assert_eq!(snapshot(&bridge).rows[0].size, row.size);
     assert_eq!(queries.get(), queries_before);
 }
 

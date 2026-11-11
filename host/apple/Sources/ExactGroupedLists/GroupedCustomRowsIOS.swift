@@ -8,11 +8,12 @@ import UIKit
 
 /// What a custom row draws as a standard cell would: the leading symbol it
 /// marked (`NodeView.listSymbol`), what it presses, marked as a cell's
-/// (`NodeView.listRow`), and where its line started when last carried, to
-/// know when it moves.
+/// (`NodeView.listRow`), its highlighted cell, and where its line started
+/// when last carried, to know when it moves.
 struct CustomLook {
     weak var symbol: NodeView?
     weak var press: NodeView?
+    weak var highlight: UICollectionViewCell?
     var line: CGFloat?
 }
 
@@ -117,6 +118,7 @@ extension GroupedListView {
         let look = customLooks.removeValue(forKey: id)
         look?.symbol?.listSymbol = false
         look?.press?.listRow = false
+        look?.highlight?.isHighlighted = false
     }
 
     /// The row's first shown child when it is the sheet's leading symbol: a
@@ -150,7 +152,7 @@ extension GroupedListView {
         let accessories = ["chevron.forward", "chevron.right", "checkmark"]
         if leadingSymbol(of: body) === shown.first,
            let after = shown.dropFirst().first(where: { !($0.kind == "image" && accessories.contains($0.props["symbolName"] ?? "")) }) {
-            let text = body.container.convert(after.frame, to: body)
+            let text = after.convert(after.boxBounds, to: body)
             if collection.effectiveUserInterfaceLayoutDirection == .rightToLeft {
                 content.size.width = max(0, text.maxX - content.minX)
             } else {

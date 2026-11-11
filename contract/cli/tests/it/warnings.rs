@@ -20,7 +20,7 @@ pub(crate) fn warned(src: &str) -> Vec<(String, u32)> {
 }
 
 /// A stack with one route whose first child is `header`, its lines at 9 on.
-fn route(header: &str) -> String {
+pub(super) fn route(header: &str) -> String {
     let header: String = header.lines().map(|l| format!("          {l}\n")).collect();
     format!(
         "routes nav\n  home \"/\"\ncomponent App\n  state q = \"\"\n  action go\n    q = \"x\"\n  view\n    main navigationKey=`${{top(nav).id}}` navigationBack=\"back\" width=\"100%\" height=\"100%\"\n      for e in stack(nav) key=e.id\n        column navigationKey=`${{e.id}}` position=\"absolute\" inset=0\n          header display=\"flex\"\n{header}          scroll flex=1\n            text \"body\"\n"
@@ -100,6 +100,54 @@ fn what_the_bar_places_or_the_compiler_cannot_see_is_not_warned() {
 }
 
 const NO_BAR: &str = "lower-header-no-bar";
+
+#[test]
+fn a_class_painted_avatar_uses_effective_rows_without_hiding_unsupported_titles() {
+    let styles = "style Avatar\n  background-color=\"-exact-system-blue\"\nstyle Gradient\n  background-image=\"linear-gradient(white, black)\"\nstyle Empty\n  background-color=\"\"\n";
+    let source = |avatar: &str, content: &str| {
+        let header = format!("  row\n    box {avatar}\n      {content}\n    text \"Ada\" role=\"heading\" aria-level=1");
+        format!("{styles}{}", route(&header))
+    };
+    for avatar in [
+        "class=Avatar", "class=Gradient", "class=Empty background-color=\"-exact-system-green\"",
+        "class=(q == \"\" ? Avatar : Empty)",
+        "class=Avatar background-color=(q == \"\" ? \"-exact-system-green\" : \"-exact-system-blue\")",
+    ] {
+        assert_eq!(warned(&source(avatar, "text \"AL\"")), [], "{avatar}");
+    }
+    for (avatar, content) in [
+        ("class=Avatar background-color=\"\"", "text \"AL\""),
+        ("class=Gradient background-image=\"none\"", "text \"AL\""),
+        ("class=Empty", "text \"AL\""),
+        ("class=Avatar", "input value=q"),
+        ("class=Avatar", "image \"assets/avatar.png\""),
+    ] {
+        let got = warned(&source(avatar, content));
+        assert!(
+            got.iter().any(|(id, _)| id == UNPLACED),
+            "{avatar}: {content}: {got:?}"
+        );
+    }
+    let direct = format!(
+        "{styles}{}",
+        route("  box class=Avatar\n    text \"AL\"\n  text \"Ada\" role=\"heading\"")
+    );
+    assert!(warned(&direct).iter().any(|(id, _)| id == UNPLACED));
+    let classed_line = format!("{styles}{}", route("  text \"Ada\" role=\"heading\"\n  row class=Avatar\n    image \"symbol:sf/bell\"\n    text \"Muted\""));
+    assert!(warned(&classed_line).iter().any(|(id, _)| id == UNPLACED));
+    for title in [
+        "text \"No heading\"",
+        "text \"A\" role=\"heading\"\n  text \"B\" role=\"heading\"",
+    ] {
+        let src = format!(
+            "{styles}{}",
+            route(&format!(
+                "  row\n    box class=Avatar\n      text \"AL\"\n    {title}"
+            ))
+        );
+        assert!(warned(&src).iter().any(|(id, _)| id == NO_BAR), "{src}");
+    }
+}
 
 #[test]
 fn a_header_with_no_heading_or_two_is_named_as_no_bar() {
@@ -1438,5 +1486,53 @@ fn a_line_height_in_points_written_bare_is_named() {
         m.starts_with("`line-height=28` is 28 times the font size")
             && m.contains("write `line-height=\"28px\"`"),
         "{m}"
+    );
+}
+
+#[test]
+fn the_windows_env_in_a_route_is_named_with_the_routes_var() {
+    // LLP 1123 D9: under a bar, `env(safe-area-inset-top)` clears the
+    // status bar a second time; a route reads its own values. A dialog is
+    // the window's.
+    let src = "routes nav\n  home \"/\"\ncomponent App\n  view\n    main navigationKey=`${top(nav).id}` width=\"100%\" height=\"100%\"\n      for e in stack(nav) key=e.id\n        column navigationKey=`${e.id}`\n          text \"x\" padding-top=\"calc(env(safe-area-inset-top) + 8px)\"\n          text \"y\" width=\"env(viewport-segment-width 0 0)\" padding-left=\"var(--exact-safe-area-inset-left)\"\n          dialog\n            text \"z\" padding-top=\"env(safe-area-inset-top)\"\n      text \"outside\" padding-top=\"env(safe-area-inset-top)\"\n";
+    let mut owner: Vec<u32> = warned(src)
+        .into_iter()
+        .filter(|(id, _)| id == "lower-env-in-owner")
+        .map(|(_, line)| line)
+        .collect();
+    owner.sort();
+    assert_eq!(owner, [8, 9], "{src}");
+    let (_, warnings) = contract::compile_warned(src);
+    let first = warnings.iter().find(|w| w.span.line == 8).unwrap();
+    assert!(
+        first
+            .message
+            .contains("`padding-top=\"calc(var(--exact-safe-area-inset-top) + 8px)\"`"),
+        "{first:?}"
+    );
+}
+
+#[test]
+fn the_windows_env_with_a_fallback_in_a_route_is_named_with_the_routes_var() {
+    let route = |value: &str| {
+        format!("routes nav\n  home \"/\"\ncomponent App\n  view\n    main navigationKey=`${{top(nav).id}}` width=\"100%\" height=\"100%\"\n      for e in stack(nav) key=e.id\n        column navigationKey=`${{e.id}}`\n          text \"x\" padding-top=\"{value}\"\n")
+    };
+    let src = route("env(safe-area-inset-top, 0px)");
+    let (_, warnings) = contract::compile_warned(&src);
+    let named = warnings
+        .iter()
+        .find(|w| w.id == "lower-env-in-owner")
+        .unwrap_or_else(|| panic!("{warnings:?}"));
+    assert!(
+        named
+            .message
+            .contains("`padding-top=\"var(--exact-safe-area-inset-top, 0px)\"`"),
+        "{named:?}"
+    );
+    // What it names compiles, and is the route's.
+    let owned = warned(&route("var(--exact-safe-area-inset-top, 0px)"));
+    assert!(
+        owned.iter().all(|(id, _)| id != "lower-env-in-owner"),
+        "{owned:?}"
     );
 }

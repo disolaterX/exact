@@ -323,6 +323,9 @@ pub enum Event {
     Swiperight,
     /// Its mirror, a left swipe (Charlie, 2026-11-10).
     Swipeleft,
+    /// A platform-recognized discrete swipe, and the direction it went:
+    /// `left`, `right`, `up` or `down` (LLP 1057.001 §8).
+    Swipe(String),
     /// A pull past the top of a scroll container asked for fresh content
     /// (UIKit's `UIRefreshControl`); the app answers through `refreshing`.
     Refresh,
@@ -599,6 +602,7 @@ impl Event {
             Event::FrameNavigation(_, n) => Some(n.value()),
             Event::FrameRecord(_, v) => Some((**v).clone()),
             Event::Atompress(a) => Some(a.value()),
+            Event::Swipe(direction) => Some(Value::record(vec![Value::str(direction)])),
             Event::Resize(r) => Some(r.value()),
             Event::Intersect {
                 is_intersecting,
@@ -1148,6 +1152,7 @@ impl<D: DataSource> Runner<D> {
             Event::Pointermove(_) => "pointermove",
             Event::Swiperight => "swiperight",
             Event::Swipeleft => "swipeleft",
+            Event::Swipe(_) => "swipe",
             Event::Refresh => "refresh",
             Event::Scroll(_) => "scroll",
             Event::Resize(_) => "resize",
@@ -1210,6 +1215,20 @@ impl<D: DataSource> Runner<D> {
                     .flatten()
             })
             .ok_or(RunnerError::UnknownView(view))?;
+        // @ref LLP 1057.001 §8.5 — a swipe in a direction the node's
+        // `swipe-direction` no longer names (it changed while the host
+        // recognized it) is dropped, as a stale delivery is, not refused.
+        if let Event::Swipe(direction) = &event {
+            let named = self
+                .kernel
+                .node(view)
+                .and_then(|n| n.props.str(exact_kernel::PropId::SwipeDirection))
+                .is_some_and(|names| names.split_ascii_whitespace().any(|n| n == direction));
+            if !named {
+                what.push_str(" (a direction it does not name)");
+                return Ok(CommitReceipt::default());
+            }
+        }
         // Events without a listener do nothing: a picker's `cancel` (LLP
         // 1069.010 D3), a dialog's `close` (LLP 1021), a scroll's end or drag, a swipe.
         if matches!(
@@ -1347,6 +1366,7 @@ impl<D: DataSource> Runner<D> {
             Event::Pointermove(_) => (EventKind::Pointermove, None, "pointermove"),
             Event::Swiperight => (EventKind::Swiperight, None, "swiperight"),
             Event::Swipeleft => (EventKind::Swipeleft, None, "swipeleft"),
+            Event::Swipe(_) => (EventKind::Swipe, None, "swipe"),
             Event::Refresh => (EventKind::Refresh, None, "refresh"),
             Event::Scroll(_) => (EventKind::Scroll, None, "scroll"),
             Event::Resize(_) => (EventKind::Resize, None, "resize"),

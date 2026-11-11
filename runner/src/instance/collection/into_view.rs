@@ -136,7 +136,10 @@ impl Collection {
         request: &IntoView,
     ) -> Result<Result<(), String>, InstanceError> {
         // Resolve an unmounted row in a disposable tree before moving either list.
-        let mut ids = Ids::default();
+        let mut ids = Ids {
+            bootstrap_extent: u.ids.bootstrap_extent,
+            ..Ids::default()
+        };
         let mut scratch = Update::new(Env { ..u.env }, u.sites, &mut ids);
         scratch.discard = true;
         let mut temporary;
@@ -406,6 +409,11 @@ impl Collection {
             false,
         )
     }
+    /// Whether a request is under way, admitted, and not waiting: the port
+    /// is headed for it, so sizes taken in aim it again (`aim_into_view`).
+    pub(super) fn request_admitted(&self) -> bool {
+        self.target.as_ref().is_some_and(|t| t.moved) && !self.request_waits()
+    }
     /// Whether the request under way waits for the reader's scroll or for a
     /// report of where the port is (§2.6).
     pub(super) fn request_waits(&self) -> bool {
@@ -557,6 +565,34 @@ impl Collection {
         let moved = self.target.as_ref().is_some_and(|t| t.moved);
         if fill.gesture || (moved && fill.scrolling) {
             self.end_into_view(IntoViewStatus::Cancelled);
+        }
+    }
+    /// After the sizes of rows a commit laid out are taken in, before the
+    /// host moves: where an admitted request now aligns, as the correction
+    /// the batch carries. Not a report: the host's next one still judges
+    /// whether it landed, and a request that waits is aimed when it lands.
+    pub(super) fn aim_into_view(&mut self, u: &Update<'_>) {
+        let Some(target) = self.target.clone().filter(|_| self.request_admitted()) else {
+            return;
+        };
+        let (Some(position), Some(current)) = (
+            self.index.position(&target.key),
+            self.geometry.as_ref().map(|g| g.offset),
+        ) else {
+            return;
+        };
+        let desired = self.aligned(u, position, target.align, current, target.offset);
+        if (desired - current).abs() <= 0.5 {
+            return;
+        }
+        if let Some(g) = &mut self.geometry {
+            g.offset = desired;
+            self.correction = Some(AnchorCorrection {
+                scroll_sequence: g.scroll_sequence,
+                offset: desired,
+                from: None,
+                smooth: target.smooth,
+            });
         }
     }
     /// After a report's measurements: where the target now aligns. A
@@ -861,6 +897,7 @@ impl Tree {
             return false;
         };
         list.covered = covered.map(|n| if n.is_finite() { n.max(0.0) } else { 0.0 });
+        list.index.set_covered_start(list.covered[0]);
         true
     }
 

@@ -271,6 +271,7 @@ impl Lowerer<'_> {
         };
         tags::validate_list(tag, expanded, *span)?;
         self.check_collection(tag, expanded, children, *span, scope)?;
+        crate::swipe::check(expanded)?;
         // @ref LLP 1115.000 D16 — whether this list's rows are cells.
         let cells = cells::rows(tag, expanded, children, grouped.is_some());
         let grouped_list = grouped.is_some();
@@ -338,6 +339,18 @@ impl Lowerer<'_> {
                     );
         }
         controls::check_zero_size(tag, expanded, children, *span)?;
+        // PROTO (safe-area design r6 §3): extension is `-exact-safe-area="extend"`.
+        if let Some(a) = expanded
+            .iter()
+            .rev()
+            .find(|a| a.name == "-exact-background-extension")
+        {
+            return err(
+                "lower-attr-value",
+                "`-exact-background-extension` is now `-exact-safe-area=\"extend\"`: the platform mirrors the box's edges into the safe areas it touches",
+                a.span,
+            );
+        }
         // @ref LLP 1116.007 D5 — a route that scrolls a grouped list is on
         // the grouped background, unless its author said otherwise.
         let grouped_page = self.nav_place.grouped_page(tag, expanded, children, *span);

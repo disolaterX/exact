@@ -14,45 +14,6 @@ import AppKit
 import CExact
 import Foundation
 import QuartzCore
-/// The process facts every session reads: the agent drives the app
-/// (LLP 1012 — the driver owns the clock), a smoke run prints and exits.
-public enum ExactEnv {
-    /// The process's environment. A production bake never enters agent mode
-    /// (LLP 1069.007 D2, ruled) and takes no module override (LLP 1024 D5):
-    /// its `EXACT_AGENT`, `EXACT_AGENT_*`, `EXACT_HATCHES` and
-    /// `EXACT_MODULES` variables are dropped here, from the process too,
-    /// before this host or its library reads one.
-    public static let environment: [String: String] = {
-        var environment = ProcessInfo.processInfo.environment
-        let agent = environment.keys.filter { ["EXACT_AGENT", "EXACT_HATCHES", "EXACT_MODULES"].contains($0) || $0.hasPrefix("EXACT_AGENT_") }.sorted()
-        guard !agent.isEmpty, productionBake else { return environment }
-        FileHandle.standardError.write(Data("exact: a production build ignores \(agent.joined(separator: ", ")) (LLP 1069.007 D2, LLP 1024 D5)\n".utf8))
-        for key in agent { environment[key] = nil; unsetenv(key) }
-        return environment
-    }()
-    /// Whether this binary was baked with `EXACT_UPDATE_TRUST=production`
-    /// (`BakedCompatibility.production`).
-    static let productionBake = BakedCompatibility.production(BakedCompatibility.json)
-    public static let agentMode = environment["EXACT_AGENT"] == "1"
-    /// `EXACT_AGENT_BIND` (`--bind`, LLP 1133.001 D7): extensions answered by their implementations under the agent.
-    static let agentBind = Set((environment["EXACT_AGENT_BIND"] ?? "").split(separator: ",").map(String.init))
-    /// `EXACT_AGENT_TIMING=platform` (LLP 1035.003 D5, opt-in): under the
-    /// agent carrier, UIKit's own transitions, presentations and keyboard
-    /// animations keep their natural timing — the ordinary app with a
-    /// socket, for observing a gesture's native motion. The default freezes
-    /// them, which the smoke depends on.
-    public static let agentTiming = environment["EXACT_AGENT_TIMING"] ?? "agent"
-    /// Whether the agent's world is settled between calls: native animation
-    /// applies at once. False under `platform` timing.
-    public static let agentFreezes = agentMode && agentTiming != "platform"
-    public static let smoke = environment["EXACT_SMOKE"] == "1"
-    /// Milliseconds since the process's `main`: the wall clock for startup stamps.
-    public static let t0 = CACurrentMediaTime()
-    public static func wall() -> Double { (CACurrentMediaTime() - t0) * 1000 }
-    /// Startup stamps, milliseconds from `main`, in order (the smoke prints them).
-    nonisolated(unsafe) public static var stamps: [(String, Double)] = []
-    public static func stamp(_ label: String) { stamps.append((label, wall())) }
-}
 /// What a session tells its host: a capability an action called (LLP 1005
 /// §3), after the batch that carried it was applied; and its state.
 public protocol ExactSessionDelegate: AnyObject {
@@ -422,6 +383,7 @@ public final class ExactSession {
     // frame's tick, a timer, a reply, an intrinsic size, a report) waits on
     // main instead, and runs after the slice lands, in order.
     private(set) var fillInFlight = false
+    private var fillStarted = 0.0
     private typealias IdleWork = (views: Int?, work: () -> Void, cancelled: (() -> Void)?)
     private var afterFill: [IdleWork] = []
     private var viewsEpoch = 0
@@ -605,6 +567,7 @@ public final class ExactSession {
     /// Send a build-only slice to the owner; its batch comes back published.
     private func sendFill(_ view: UInt32, _ bytes: Data) {
         fillInFlight = true
+        fillStarted = CACurrentMediaTime() // PROTO (UIKit-first measurement)
         let captured = generation
         runtime.collectionFeedbackAsync(bytes, now: now()) { [weak self] batch in
             self?.publish(.fill(view), batch, captured)
@@ -659,7 +622,9 @@ public final class ExactSession {
             let began = CACurrentMediaTime()
             var submitted = 0.0
             switch next.kind {
-            case .fill: fillInFlight = false
+            case .fill:
+                fillInFlight = false
+                if Self.protoLive { NSLog("PROTO live fill %.0f µs", (CACurrentMediaTime() - fillStarted) * 1e6) }
             case .tick: tickInFlight = false
             case .advance: advanceInFlight = false
             case .canvas: canvasInFlight = false
@@ -768,11 +733,13 @@ public final class ExactSession {
         presenter.onIntrinsic = { [unowned self] sizes in whenIdle(bound: true) { [unowned self] in applyUnlessEmpty(runtime.intrinsics(sizes)) } }
         // @ref LLP 1075.003 §3.5, Q3 (c) — what a bar covers reaches layout as an intrinsic
         // size does, on AppKit too (LLP 1115.002 D8.1); the hatches replay once the module connects.
-        presenter.onCovers = { [unowned self] covers in whenIdle(bound: true) { [unowned self] in applyUnlessEmpty(runtime.covers(covers)) } }
+        // An owner's values change with each frame of a keyboard; where no row reads them the batch changes nothing (LLP 1123 D9).
+        presenter.onCovers = { [unowned self] covers, owners in applyMeasuredCovers(covers, owners: owners) } // PROTO (UIKit-first measurement)
         presenter.onResizeBox = { [unowned self] id, width, height in
             whenIdle(bound: true) { [unowned self] in applyUnlessEmpty(runtime.resizeBox(id, width: width, height: height)) }
         }
         #if os(iOS) || os(tvOS)
+        presenter.onMovingTops = { [unowned self] moving in whenIdle(bound: true) { [unowned self] in applyUnlessEmpty(runtime.covers([], movingTops: moving)) } } // PROTO (rule 4)
         natives.onHatchesConnected = { [weak self] in
             self?.presenter.navigation.replayHatches()
             self?.presenter.elements.replay()
@@ -793,6 +760,7 @@ public final class ExactSession {
         presenter.onKey = { [unowned self] id, press in applyInput(runtime.key(id, press.payload, up: press.up, capture: press.capture, now: now())) }
         presenter.onContextmenu = { [unowned self] id in applyInput(runtime.contextmenu(id, now: now())) }
         presenter.onSwiperight = { [unowned self] id in applyInput(runtime.swiperight(id, now: now())) }
+        presenter.onSwipe = { [unowned self] id, direction in applyInput(runtime.swipe(id, direction: direction, now: now())) }
         presenter.onRefresh = { [unowned self] id in applyInput(runtime.refresh(id, now: now())) }
         presenter.onPan = { [unowned self] id, dx, dy in applyInput(runtime.pan(id, dx: dx, dy: dy, now: now())) }
         presenter.onPanRelease = { [unowned self] id, vx, vy in applyInput(runtime.panRelease(id, vx: vx, vy: vy, now: now())) }
@@ -1068,8 +1036,7 @@ public final class ExactSession {
         advanceIfDue()
     }
 
-    /// The appearance reports a landing held back (`holdingReports`), asked
-    /// once the batch the owner made before them has applied or skipped.
+    /// Pending appearance and intrinsic reports, after preceding owner batches apply or skip.
     private func drainReports() {
         if colorsOwed, !holdingReports, !awaitingTree { colorsOwed = false; apply(runtime.reportColors(tint: SystemColor.appTint.flatMap { SystemColor.tintPair($0) })) }
         while !holdingReports, !pendingViewDark.isEmpty {
@@ -1081,8 +1048,10 @@ public final class ExactSession {
                 if let q = batch.seq { natives.hatchClock.seq = q.1 }
             } else { apply(batch) }
         }
+    #if os(iOS) || os(tvOS)
+        if !holdingReports, !awaitingTree { presenter.flushIntrinsicSizes() } // PROTO: settle projected heights before collection feedback and the first frame
+    #endif
     }
-
     #if DEBUG
     /// Tests: a tick's slice the owner published, not yet landed.
     func publishTickForTests(_ batch: Batch) { tickInFlight = true; publish(.tick, batch, generation) }
@@ -1330,21 +1299,14 @@ public final class ExactSession {
         change.segments = fold?.rects
         guard booted, state != .destroyed, !change.isEmpty else { return }
         if let screen = change.screen { screenSize = screen }
+        // The routes are told their own segments first (LLP 1123 D9), so the batch lays them out once
+        let before = presenter.fold
+        if let fold { presenter.fold = fold }
         let batch = runtime.view(change)
-        if let fold, batch.error == nil { presenter.fold = fold }
+        if batch.error != nil { presenter.fold = before }
         apply(batch)
     }
     private(set) var screenSize: CGSize? // the screen last told, for the agent's synthetic segments
-    /// The device's posture and the viewport segments a fold makes (LLP 1078 D4, D5): the view's reading,
-    /// kept for the agent's `layout.env` and told to the kernel and the runner in one batch.
-    /// Returns the batch's error, when the runtime refused the grid; the fold is kept only when it took it.
-    @discardableResult func segments(_ fold: ViewportFold) -> String? {
-        guard booted, state != .destroyed else { return nil }
-        let batch = runtime.segments(fold)
-        if batch.error == nil { presenter.fold = fold }
-        apply(batch)
-        return batch.error
-    }
     /// The view's appearance, for paint motion's `light-dark()` (LLP 1062).
     /// The platform's colours are reported first: before the first scheme
     /// that fills the kernel's table without motion, so nothing eases from a

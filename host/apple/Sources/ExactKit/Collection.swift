@@ -66,9 +66,14 @@ struct CollectionCursor {
     /// it is stale, as an absolute one is.
     private(set) var jumpedAt: UInt64 = 0
     mutating func jump() { advance(); jumpedAt = sequence }
+    /// The reader's latest travel intent (`userIntent`), before later offset reports.
+    private(set) var touchedAt: UInt64 = 0
+    mutating func touch() { advance(); touchedAt = sequence }
+    /// Whether a correction of `revision` is still to land.
+    func owes(revision: UInt64) -> Bool { correctedRevision.map { revision > $0 } ?? true }
     /// `authored`: the correction is a `scrollIntoView`'s, which applies whatever the reader scrolled since.
     mutating func takeCorrection(revision: UInt64, sequence: UInt64, authored: Bool = false) -> Bool {
-        guard authored || sequence == self.sequence, correctedRevision.map({ revision > $0 }) ?? true else { return false }
+        guard authored || sequence == self.sequence, owes(revision: revision) else { return false }
         correctedRevision = revision
         return true
     }
@@ -265,6 +270,14 @@ package final class CollectionHost {
         /// The request's corrections are the app's: the reader has made no
         /// gesture since it was made (the web glue's `authored`).
         var authored: Bool { snapshot.seeking && !gesture }
+        #if os(iOS) || os(tvOS)
+        /// Row positions before the batch, relative to the port (`rideBatch`).
+        var batchRows: [UInt32: CGFloat] = [:]
+        #endif
+        /// This batch's report puts rows before the rows the last one built,
+        /// or takes rows from before them: its shift moves the list's start
+        /// (a page of history landing), not rows measured (`shift`).
+        var startMoved = false
         init(_ snapshot: CollectionSnapshot) { self.snapshot = snapshot }
     }
     weak var presenter: Presenter?
@@ -275,16 +288,42 @@ package final class CollectionHost {
         guard row.measured, row.epoch == m.epoch, let height = row.size else { return false }
         return (height == 0) == (m.size == 0) && abs(height - m.size) <= 0.01
     }
+    /// Whether rows came or went before the rows both snapshots built: a row
+    /// built in both sits at another index.
+    static func startMoved(from old: CollectionSnapshot, to new: CollectionSnapshot) -> Bool {
+        let was = Dictionary(old.rows.lazy.filter { $0.index >= 0 }.map { ($0.view, $0) }, uniquingKeysWith: { a, _ in a })
+        return new.rows.contains { row in
+            guard row.index >= 0, let before = was[row.view] else { return false }
+            return before.root == row.root && before.index != row.index
+        }
+    }
     var entries: [UInt32: Entry] = [:]
     var interaction: UInt32?
     var contactEvent: AnyObject?
     var batchDepth = 0
     var correcting = false
+    #if os(iOS) || os(tvOS)
+    /// The exits under way when the batch began, and the lists whose rows
+    /// this batch's removal or commit moves (`rideBatch`).
+    private var batchLeaving = Set<UInt32>()
+    var riding = Set<UInt32>()
+    /// The lists the batches under way say a runner commit moved (`Batch.rides`).
+    private var rideOwed = Set<UInt32>()
+    /// The lists whose last fling UIKit projected to an edge as the finger
+    /// left (`flingProjected`).
+    var edgeBoundFlings = Set<UInt32>()
+    #endif
     private var dirty = Set<UInt32>()
     private(set) var budget = CollectionTurnBudget()
     /// Lists whose uncovered port a rescue reports first, whatever the
     /// turn has spent (`CollectionTurnBudget.begin(rescue:)`).
     private var rescuing = Set<UInt32>()
+    /// The passes one rescue takes whatever the turn has spent: one builds
+    /// what shows, the next reports its measurements. A port they leave
+    /// uncovered is rescued again by the next scroll callback. Feedback work
+    /// is bounded per callback (LLP 1010 §6.5): a rescue whose every batch
+    /// dirtied its list again would otherwise hold the main thread for good.
+    static let rescuePasses = 2
     /// Each turn of the main run loop gets its passes: a continuation
     /// (`schedule`) or a slice is not the only start of a turn.
     private var turnObserver: CFRunLoopObserver?
@@ -487,11 +526,25 @@ package final class CollectionHost {
         refreshPins = false; lastVisited = 0
         #if os(iOS) || os(tvOS)
         focusFound = nil
+        batchLeaving.removeAll(); riding.removeAll(); edgeBoundFlings.removeAll()
         #endif
     }
     func beginBatch(_ batch: Batch) {
-        if batchDepth == 0 { for (view, entry) in entries { entry.batchInsets = portInsets(view); entry.batchStart = geometry(view)?.offset } }
+        if batchDepth == 0 {
+            #if os(iOS) || os(tvOS)
+            batchLeaving = presenter.map { Set($0.leaving.keys) } ?? []
+            #endif
+            for (view, entry) in entries {
+                entry.batchInsets = portInsets(view); entry.batchStart = geometry(view)?.offset
+                #if os(iOS) || os(tvOS)
+                entry.batchRows = rowStarts(view)
+                #endif
+            }
+        }
         batchDepth += 1
+        #if os(iOS) || os(tvOS)
+        rideOwed.formUnion(batch.rides)
+        #endif
         for op in batch.ops where op.op == .collections {
             guard let items = op.payload["items"] as? [[String: Any]] else { continue }
             let snapshots = items.compactMap(CollectionSnapshot.init)
@@ -523,6 +576,7 @@ package final class CollectionHost {
                             entry.requestAt = ProcessInfo.processInfo.systemUptime
                             stopAnimation(snapshot.view)
                         } else if !snapshot.underWay { entry.gesture = false }
+                        if snapshot.revision > entry.snapshot.revision, Self.startMoved(from: entry.snapshot, to: snapshot) { entry.startMoved = true }
                         entry.snapshot = snapshot
                     }
                 } else { entries[snapshot.view] = Entry(snapshot) }
@@ -542,6 +596,11 @@ package final class CollectionHost {
         // clamp against this coherent extent and suppress correction notifications.
         for (view, entry) in entries {
             guard let port = geometry(view) else { continue }
+            #if os(iOS) || os(tvOS)
+            // A nested batch must suppress the port's motion too; the rows
+            // move once, after the outermost batch has placed them all.
+            if removes(view, began: batchLeaving) || rideOwed.contains(view) { riding.insert(view) }
+            #endif
             let dimensions = [port.portCross, port.portMain, port.cross]
             let planned = entry.cursor.sequence, jumped = entry.cursor.jumpedAt
             if let previous = entry.port, previous != dimensions { entry.cursor.jump() }
@@ -558,6 +617,16 @@ package final class CollectionHost {
                 correcting = false
             }
             entry.batchInsets = nil
+            // An owed absolute correction planned since the reader's travel
+            // began can stop the remaining fling before it cancels the intent.
+            // An older correction yields to the reader; a rubber band already
+            // returning to the target edge keeps its spring (`stopMomentum`).
+            if let correction = entry.snapshot.correction, correction.from == nil, correction.sequence >= entry.cursor.touchedAt,
+               entry.cursor.owes(revision: entry.snapshot.revision) {
+                correcting = true
+                stopMomentum(view, toward: correction.offset)
+                correcting = false
+            }
             if let correction = entry.snapshot.correction, correction.from != nil {
                 // Rows before the anchor changed size in this batch: the
                 // offset moves with them before this frame displays, even
@@ -579,13 +648,28 @@ package final class CollectionHost {
                entry.cursor.takeCorrection(revision: entry.snapshot.revision,
                    sequence: correction.sequence == planned ? entry.cursor.sequence : correction.sequence, authored: entry.authored) {
                 correcting = true
+                #if os(iOS) || os(tvOS)
+                // A list riding the batch lands at once: its rows move from where they showed
+                correct(view, top: correction.offset, extent: entry.snapshot.extent, smooth: correction.smooth && !riding.contains(view), authored: entry.authored, from: entry.batchStart)
+                #else
                 correct(view, top: correction.offset, extent: entry.snapshot.extent, smooth: correction.smooth, authored: entry.authored)
+                #endif
                 correcting = false
             }
+            #if os(iOS) || os(tvOS)
+            if batchDepth == 1, riding.remove(view) != nil { rideBatch(view) }
+            #endif
             entry.batchStart = nil
+            entry.startMoved = false
             dirty.insert(view)
         }
+        #if os(iOS) || os(tvOS)
+        if batchDepth == 1 { riding.removeAll(); batchLeaving.removeAll() }
+        #endif
         batchDepth = max(0, batchDepth - 1)
+        #if os(iOS) || os(tvOS)
+        if batchDepth == 0 { rideOwed.removeAll() }
+        #endif
     }
     /// The collection whose mounted row holds `descendant`: the nearest row
     /// wrapper at or above it names the owner, as the web host's `liveView`
@@ -623,7 +707,7 @@ package final class CollectionHost {
         #if os(macOS)
         if travel { readerMoved(view) }
         #endif
-        if travel { entry.cursor.advance() } else { entry.cursor.jump() }
+        if travel { entry.cursor.touch() } else { entry.cursor.jump() }
         dirty.insert(view)
         schedule()
     }
@@ -808,11 +892,14 @@ package final class CollectionHost {
         // Each list once per flush, at most, without a report (bounded
         // even if a visit re-dirties its list).
         var free = entries.count
+        // Passes a rescue takes past the turn's (`rescuePasses`).
+        var rescues = 0
         while !dirty.isEmpty {
             // A slice in flight holds every report until it lands (T4).
             if filling?() == true { return }
-            let rescue = !rescuing.isDisjoint(with: dirty)
+            let rescue = rescues < Self.rescuePasses && !rescuing.isDisjoint(with: dirty)
             guard budget.begin(rescue: rescue) else { return }
+            if rescue { rescues += 1 }
             #if os(iOS) || os(tvOS)
             let focus = focusFound ?? focusedView()
             focusFound = focus

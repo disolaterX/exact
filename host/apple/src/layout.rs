@@ -105,6 +105,7 @@ impl<D: DataSource> Host<D> {
     pub(super) fn record_layout(&mut self, receipt: &exact_kernel::LayoutReceipt) {
         self.pending_layout
             .extend(receipt.updated.iter().chain(&receipt.flow_changed).copied());
+        self.pending_changed.extend_from_slice(&receipt.changed); // PROTO (rule 4)
     }
 
     pub(super) fn queue_layout(&mut self, id: ViewId) {
@@ -131,6 +132,17 @@ impl<D: DataSource> Host<D> {
     /// Lay every root out under the viewport and emit the parent-relative
     /// frames and scroll content sizes that changed. One that fails is
     /// owed (`layout_owed`) until one succeeds.
+    /// [`Host::layout`] after `receipts`: the lists whose rows a runner
+    /// commit moves ride the move (`Presence::committed`).
+    pub(super) fn commit_layout(
+        &mut self,
+        batch: &mut Batch,
+        receipts: &[exact_runner::Timed],
+    ) -> Result<(), String> {
+        self.presence.committed = !receipts.is_empty();
+        self.layout(batch)
+    }
+
     pub(super) fn layout(&mut self, batch: &mut Batch) -> Result<(), String> {
         let laid = self.layout_pass(batch);
         self.layout_owed = laid.is_err();
@@ -202,7 +214,127 @@ impl<D: DataSource> Host<D> {
         self.height_projection.clear();
         self.height_projection
             .extend_from_slice(&self.height_sampling);
-        self.emit_layout(batch)
+        // PROTO (rule 4): what this emission's layouts touched, for the far pass's trigger
+        let touched: Vec<NodeKey> = self.pending_layout.iter().copied().collect();
+        let changed = std::mem::take(&mut self.pending_changed);
+        let before = batch.op_count();
+        self.emit_layout(batch)?;
+        let owed = std::mem::take(&mut self.far_owed);
+        if batch.op_count() != before || owed {
+            self.emit_far(batch, owed, &touched, &changed);
+        }
+        Ok(())
+    }
+
+    /// PROTO (rule 4): `route`'s clearance's top edge moves, or no longer does.
+    pub fn set_moving_top(&mut self, route: ViewId, on: bool) {
+        self.moving_tops.retain(|r| *r != route);
+        if on {
+            self.moving_tops.push(route);
+            self.far_owed = true;
+        }
+    }
+
+    /// PROTO (rule 4, "Exact describes, UIKit drives"): for each route whose
+    /// top edge moves, the frame each box that depends on the edge would take
+    /// with the edge at the block's top, and where a box is not linear in the
+    /// edge, its frames at the knots that make it so (`halve`): the host moves
+    /// those boxes along them as UIKit moves the edge.
+    fn emit_far(
+        &mut self,
+        batch: &mut Batch,
+        owed: bool,
+        touched: &[NodeKey],
+        changed: &[NodeKey],
+    ) {
+        for route in self.moving_tops.clone() {
+            // A layout confined to the content the last pass froze changes nothing a trial lays out
+            if !owed && !self.reaches_trial(route, touched, changed) {
+                continue;
+            }
+            let started = std::time::Instant::now(); // PROTO: the far pass timed
+                                                     // One trial session per pass: the kernel copies once and lays out each place in the copy
+            let Ok(mut trial) = self.runner.kernel_mut().clearance_trial(route, 0.0) else {
+                // Clear retained frames when a trial cannot start
+                batch.far_reset(route, 0, 0, [0, 0, 0]);
+                continue;
+            };
+            self.far_frozen.insert(route, trial.frozen().to_vec());
+            let Ok(all) = trial.frames(1.0) else {
+                continue;
+            };
+            let moving: Vec<_> = all
+                .into_iter()
+                .filter(|(_, now, far)| !near(now, far))
+                .collect();
+            let ids: Vec<ViewId> = moving.iter().map(|m| m.0).collect();
+            let (rest, far): (Vec<Frame>, Vec<Frame>) = moving.iter().map(|m| (m.1, m.2)).unzip();
+            // How far the edge travels across the range, read off the boxes it moves furthest
+            let travel = rest
+                .iter()
+                .zip(&far)
+                .map(|(a, b)| (a.y - b.y).abs().max((a.height - b.height).abs()))
+                .fold(0.0, f32::max);
+            let mut knots = Vec::new();
+            halve(
+                &mut trial,
+                &ids,
+                (0.0, &rest),
+                (1.0, &far),
+                travel,
+                &mut knots,
+            );
+            drop(trial);
+            knots.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let (copy, lay, collect, _) = exact_kernel::kernel::take_trial_phases(); // PROTO: the trials' phases
+            batch.far_reset(
+                route,
+                started.elapsed().as_micros() as u64,
+                TRIALS.with(|n| n.replace(0)) + 1,
+                [copy, lay, collect],
+            );
+            for (i, (id, now, f)) in moving.iter().enumerate() {
+                let inner: Vec<(f32, [f32; 4])> = knots
+                    .iter()
+                    .map(|(t, frames)| (*t, rect(frames[i])))
+                    .collect();
+                batch.far(*id, route, rect(*now), rect(*f), &inner);
+            }
+        }
+    }
+
+    /// PROTO (rule 4): whether a box this emission touched lies under `route` outside the content its last far
+    /// pass froze, or is a frozen scroller whose own frame changed: then the route's far frames may have changed.
+    fn reaches_trial(&self, route: ViewId, touched: &[NodeKey], changed: &[NodeKey]) -> bool {
+        let Some(frozen) = self.far_frozen.get(&route) else {
+            return true;
+        };
+        let kernel = self.runner.kernel();
+        for &key in touched.iter().chain(changed) {
+            let Some(node) = kernel.node_by_key(key) else {
+                return true;
+            };
+            if frozen.contains(&node.id) {
+                if changed.contains(&key) {
+                    return true;
+                }
+                continue;
+            }
+            if node.id == route {
+                return true;
+            }
+            let mut at = node.parent;
+            while let Some(id) = at {
+                if frozen.contains(&id) {
+                    break;
+                }
+                if id == route {
+                    return true;
+                }
+                at = kernel.node(id).and_then(|n| n.parent);
+            }
+        }
+        false
     }
 
     /// @ref LLP 1083 D3 — each sticky node's constraint, when it changed.
@@ -273,6 +405,7 @@ impl<D: DataSource> Host<D> {
     /// The parent-relative frames and scroll content sizes that changed since
     /// the presenter last heard them.
     fn emit_layout(&mut self, batch: &mut Batch) -> Result<(), String> {
+        let snapping = self.presence.snap;
         self.judge_list_moves();
         // Preserve publication order without a tree insertion for each touch.
         let mut pending: Vec<_> = std::mem::take(&mut self.pending_layout)
@@ -470,6 +603,7 @@ impl<D: DataSource> Host<D> {
         }
         self.layout_withheld = false;
         self.emit_ranks(batch);
+        self.measure_collections(&moved, !snapping, batch)?;
         self.emit_collections(batch)
     }
 
@@ -490,6 +624,7 @@ impl<D: DataSource> Host<D> {
         batch: &mut Batch,
         committed: bool,
     ) -> Result<(), String> {
+        self.presence.committed = committed;
         let fonts = self
             .font_hook
             .as_ref()
@@ -500,6 +635,7 @@ impl<D: DataSource> Host<D> {
         }
         if !self.height_layout_if_needed(batch)? && committed {
             self.judge_list_moves();
+            self.measure_collections(&IdSet::default(), false, batch)?;
             self.emit_collections(batch)?;
         }
         Ok(())
@@ -508,6 +644,63 @@ impl<D: DataSource> Host<D> {
     /// The lists' metadata, when it moved. Layout and receipt work may change
     /// the live window; motion-only ticks and stale feedback never traverse
     /// the tree to collect it.
+    /// @ref LLP 1072 §8.7 — each list's mounted rows, at the sizes the
+    /// layout gave them as the presenter reads them from their frames, taken
+    /// in before the lists' snapshots go out: rows laid out at other sizes
+    /// than the list's estimates move the rows after them, and the batch
+    /// that moves them carries the extent and the anchor's correction that
+    /// move implies, where the presenter's next report would land a frame
+    /// later. Only a list the runner changed since its last measurement (a
+    /// report, rows mounted or retired, data), or a row wrapper of which
+    /// this layout moved or resized (`moved`). Such a list rides the move
+    /// (`Batch::rides`) when a runner commit made it and `rides` allows:
+    /// not a resize, which takes places without motion.
+    fn measure_collections(
+        &mut self,
+        moved: &IdSet<ViewId>,
+        rides: bool,
+        batch: &mut Batch,
+    ) -> Result<(), String> {
+        let rides = std::mem::take(&mut self.presence.committed) && rides;
+        if self.native_mode() {
+            return Ok(());
+        }
+        let wire = |n: f32| {
+            let mut s = String::new();
+            style::push_num(&mut s, n);
+            s.parse::<f64>().unwrap_or(f64::from(n))
+        };
+        let mut revisions = IdMap::default();
+        let mut mounted = Vec::new();
+        for head in self.runner.collections_shallow() {
+            let list = head.view;
+            let mut revision = head.revision;
+            self.runner.collection_mounted(list, &mut mounted);
+            let moved_row = mounted.iter().any(|(wrapper, _)| moved.contains(wrapper));
+            if rides && moved_row {
+                batch.rides.push(list);
+            }
+            if self.presence.measured.get(&list) != Some(&revision) || moved_row {
+                let horizontal = head.axis == exact_runner::ListAxis::Horizontal;
+                let rows: Vec<_> = (mounted.iter())
+                    .filter_map(|(wrapper, _)| {
+                        let (_, _, w, h) = self.mirror.get(wrapper)?.frame?;
+                        let (along, across) = if horizontal { (w, h) } else { (h, w) };
+                        Some((*wrapper, wire(along), wire(across)))
+                    })
+                    .collect();
+                if !rows.is_empty() {
+                    let measured = (self.runner.collection_measured(list, &rows))
+                        .map_err(|e| format!("collection measurement: {e:?}"))?;
+                    revision = measured.unwrap_or(revision);
+                }
+            }
+            revisions.insert(list, revision);
+        }
+        self.presence.measured = revisions;
+        Ok(())
+    }
+
     fn emit_collections(&mut self, batch: &mut Batch) -> Result<(), String> {
         let collections = if self.native_mode() {
             self.collection_heads = None;
@@ -1184,4 +1377,73 @@ mod tests {
             grows(&batch)
         );
     }
+}
+
+/// PROTO (rule 4): how far apart two frames may be, in points, and count as one
+const SLACK: f32 = 0.25;
+
+thread_local! {
+    /// PROTO (rule 4): the trial layouts `halve` ran, for the far pass's log
+    static TRIALS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// PROTO (rule 4): whether two frames are the same within `SLACK`
+fn near(a: &Frame, b: &Frame) -> bool {
+    [a.x - b.x, a.y - b.y, a.width - b.width, a.height - b.height]
+        .iter()
+        .all(|d| d.abs() <= SLACK)
+}
+
+fn rect(f: Frame) -> [f32; 4] {
+    [f.x, f.y, f.width, f.height]
+}
+
+/// PROTO (rule 4): the knots between `(t0, f0)` and `(t1, f1)` at which the
+/// boxes `ids` of `route` are laid out, so that each is linear in the edge
+/// between neighbouring knots: the midpoint is laid out (`ClearanceTrial::frames`)
+/// and, where any box strays from the line between the ends by more than
+/// `SLACK`, it becomes a knot and each half is halved again, until a range
+/// spans no more than `SLACK` of the edge's `travel`, where a box's error
+/// stays within `SLACK` too. A box between a range's ends that is straight at
+/// its middle is taken to be straight throughout: a `min-*` or `max-*` bound
+/// reached once bends it off the line at the middle.
+fn halve(
+    trial: &mut exact_kernel::kernel::ClearanceTrial<'_>,
+    ids: &[ViewId],
+    (t0, f0): (f32, &[Frame]),
+    (t1, f1): (f32, &[Frame]),
+    travel: f32,
+    knots: &mut Vec<(f32, Vec<Frame>)>,
+) {
+    if ids.is_empty() || (t1 - t0) * travel <= SLACK {
+        return;
+    }
+    let tm = (t0 + t1) / 2.0;
+    TRIALS.with(|n| n.set(n.get() + 1));
+    let Ok(all) = trial.frames(tm) else {
+        return;
+    };
+    let at: std::collections::HashMap<ViewId, Frame> =
+        all.into_iter().map(|(id, _, f)| (id, f)).collect();
+    let mid: Vec<Frame> = ids
+        .iter()
+        .zip(f0)
+        .map(|(id, a)| at.get(id).copied().unwrap_or(*a))
+        .collect();
+    let line = |a: &Frame, b: &Frame| Frame {
+        x: (a.x + b.x) / 2.0,
+        y: (a.y + b.y) / 2.0,
+        width: (a.width + b.width) / 2.0,
+        height: (a.height + b.height) / 2.0,
+    };
+    if mid
+        .iter()
+        .zip(f0.iter().zip(f1))
+        .all(|(m, (a, b))| near(m, &line(a, b)))
+    {
+        return;
+    }
+    knots.push((tm, mid.clone()));
+    halve(trial, ids, (t0, f0), (tm, &mid), travel, knots);
+    halve(trial, ids, (tm, &mid), (t1, f1), travel, knots);
 }

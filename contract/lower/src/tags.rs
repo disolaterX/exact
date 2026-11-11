@@ -533,6 +533,10 @@ pub fn attr(name: &str) -> Option<AttrTarget> {
         "reachend" => AttrTarget::Handler("reachend"),
         "swiperight" => AttrTarget::Handler("swiperight"),
         "swipeleft" => AttrTarget::Handler("swipeleft"),
+        // @ref LLP 1057.001 §8 — a discrete swipe in the directions a node names
+        "swipe" => AttrTarget::Handler("swipe"),
+        "swipe-direction" => AttrTarget::Prop(p("swipeDirection")),
+        "touch-count" => AttrTarget::Prop(p("touchCount")),
         "refresh" => AttrTarget::Handler("refresh"),
         "scroll" => AttrTarget::Handler("scroll"),
         "scrollend" => AttrTarget::Handler("scrollend"),
@@ -626,7 +630,11 @@ pub fn attr(name: &str) -> Option<AttrTarget> {
         "orientationlock" => AttrTarget::Prop(p("orientationlock")),
         // @ref LLP 1115.000 D5.2 — a route's say over the platform's bar:
         // `none` for a full-bleed screen.
-        "navigationBar" => AttrTarget::Prop(p("navigationBar")),
+        "navigationBar" => AttrTarget::Prop(p(name)),
+        "-exact-safe-area" => AttrTarget::Prop(p("safeArea")),
+        "-exact-background-extension" => AttrTarget::Prop(p("backgroundExtension")),
+        // @ref LLP 1127 — a sheet that an expanded split shows as its inspector.
+        "navigationInspector" => AttrTarget::Prop(p(name)),
         "navigationSource" | "sharedElement" => AttrTarget::Prop(p(name)),
         // @ref LLP 1075.003 §3.5 — the route's content scroll view, by HTML id.
         "navigationScroll" => AttrTarget::Prop(p("navigationScroll")),

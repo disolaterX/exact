@@ -60,7 +60,8 @@ extension NodeView {
         guard props["listItemKey"] != nil else { return self }
         return container.subviews.lazy.compactMap { $0 as? NodeView }.first
     }
-    fileprivate var presses: Bool { handlers.contains("press") || defaultLink != nil }
+    /// A press runs its authored handler or follows its default link.
+    var presses: Bool { handlers.contains("press") || defaultLink != nil }
     /// The node a tap on this row presses, as the Mac's table has it
     /// (`TableFeed.pressing`): the row itself when it presses; else, where
     /// the row is a swipe container, the content it names. Nil for a row of
@@ -98,7 +99,7 @@ extension NodeView {
     /// content).
     fileprivate var firstText: NodeView? {
         if kind == "text" { return self }
-        for case let child as NodeView in container.subviews where !child.isHidden && child.frame.maxX > 0 && child.frame.minX < bounds.width {
+        for case let child as NodeView in container.subviews where !child.isHidden && child.boxFrame.maxX > boxBounds.minX && child.boxFrame.minX < boxBounds.maxX {
             if let found = child.firstText { return found }
         }
         return nil

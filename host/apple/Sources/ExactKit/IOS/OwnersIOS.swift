@@ -48,6 +48,29 @@ struct PressPath {
 }
 
 extension Presenter {
+    /// The view editing with the keyboard: the editor whose keys stand down
+    /// for a card (PopoverKeysIOS.swift), else the first responder that takes
+    /// keys and is mounted here or is the session's prompt.
+    var keyboardEditor: UIView? {
+        #if os(iOS)
+        if let editor = heldKeyboardEditor { return editor }
+        #endif
+        guard let responder = FirstResponder.current as? UIView, responder is UIKeyInput,
+              mounts(responder) || responder === keyboardPrompt else { return nil }
+        return responder
+    }
+    var hasKeyboardEditor: Bool { keyboardEditor != nil }
+
+    /// A route's content or its projected search field currently owns text input.
+    func ownsKeyboard(in container: UIView) -> Bool { edits(in: container) || editsInBar(of: container) }
+    /// Whether the keyboard's editor is in `container`'s content.
+    func edits(in container: UIView) -> Bool { keyboardEditor?.isDescendant(of: container) == true }
+    /// Whether the keyboard's editor is the search field of the bar over `container`'s route.
+    func editsInBar(of container: UIView) -> Bool {
+        guard let editor = keyboardEditor else { return false }
+        return (ViewPresentation.controller(for: container) as? RouteController)?.search?.field?.headerField === editor
+    }
+
     /// Whether `view` is mounted in this session: in its document, or in a
     /// presentation beside it.
     func mounts(_ view: UIView) -> Bool {
@@ -203,6 +226,8 @@ final class OwnerBlocks {
     /// What the runtime was last told, by route: its block, and its
     /// placement unless it is presented.
     private(set) var told: [UInt32: (block: HostBlock, placement: BlockPlacement?)] = [:]
+    /// How the routes were told they show against their stack's top (a split's columns).
+    private var toldShown: [UInt32: BlockShown] = [:]
     private var resetting = false, revealOwed = false
     /// Each block's rectangle in its root's coordinates (`BatchOp.blockRect`),
     /// as the last layout sent it: what an open popover is reported by.
@@ -334,9 +359,24 @@ final class OwnerBlocks {
         }
         // A block taken back forgets its placement with it
         blocks += told.keys.filter { now[$0] == nil && presenter.views[$0] != nil }.map { ($0, nil) }
+        // A block given again starts in its stack in the kernel: how it is shown is told again.
+        let given = Set(now.keys.filter { told[$0] == nil })
         told = now
-        if !blocks.isEmpty || !placements.isEmpty {
-            session.applyUnlessEmpty(session.runtime.blocks(blocks, placements: placements), scrolled: true)
+        // A split's list shows beside its detail, live (LLP 1127 D8), as does the detail beside its
+        // inspector; the detail under the list that overlays it, and the columns under a sheet, show, not live.
+        let split = presenter.navigation.splitShown
+        var shown: [UInt32: BlockShown] = [:]
+        for route in split.beside { shown[route.node.id] = .beside }
+        for route in split.under { shown[route.node.id] = .under }
+        let changes = Set(toldShown.keys).union(shown.keys).filter { (toldShown[$0] != shown[$0] || given.contains($0)) && (now[$0] != nil || shown[$0] != nil) }.map { ($0, shown[$0] ?? .inStack) }
+        toldShown = shown
+        // A route no frame has shown is told first, still (`tellStill`).
+        var untold = changes
+        presenter.navigation.tellStill(blocks, placements) { blocks, placements in
+            if !blocks.isEmpty || !placements.isEmpty || !untold.isEmpty {
+                session.applyUnlessEmpty(session.runtime.blocks(blocks, placements: placements, shown: untold), scrolled: true)
+            }
+            untold = []
         }
         // Reveal against the blocks just told, after their pending fill
         if revealOwed {
@@ -373,7 +413,7 @@ final class OwnerBlocks {
         resetting = true
         teardown()
         resetting = false
-        told = [:]
+        told = [:]; toldShown = [:]
         blockRects = [:]
         revealOwed = false
     }

@@ -23,6 +23,8 @@ extension NodeView {
         defer { if swipeOwner { presenter?.swipeActions.painted.willEnd(self, scrollView, target: targetContentOffset) } }
         #endif
         targetContentOffset.pointee = snappedOffset(targetContentOffset.pointee, in: scrollView)
+        // Where a list's fling will rest, for a page that lands under it (`CollectionHost.shift`)
+        presenter?.collections.flingProjected(id, to: targetContentOffset.pointee, in: scrollView)
     }
 
     /// The native resting position, optionally constrained to the snap area
@@ -35,7 +37,7 @@ extension NodeView {
             for case let node as NodeView in view.subviews where !node.isHidden {
                 let align = node.style["scroll_snap_align"]?.string
                 if align == "start" || align == "end" {
-                    let rect = node.convert(node.bounds, to: scrollView)
+                    let rect = node.convert(node.boxBounds, to: scrollView)
                     let width = scrollView.bounds.width
                     // A snap area wider than the viewport can be explored
                     // freely while it covers the viewport (CSS Snap §5.2.2);

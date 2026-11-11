@@ -146,7 +146,13 @@ extension NodeView {
     func pressFollows(inside: Bool) {
         guard pressed else { return }
         pressPaint.outside = !inside
-        if defaultLink != nil { showPress(false); return }
+        #if os(iOS)
+        let grouped = presenter?.groupedLists?.highlight(carried: self, (inside || holds("active")) && platformPressFeedback) == true
+        if grouped && platformPressFeedback { return }
+        #else
+        let grouped = false
+        #endif
+        if defaultLink != nil, !grouped { showPress(false); return }
         if holds("active") { return }
         if !inside { paintPress(false); aimPress(false) }
         #if os(iOS)
@@ -158,6 +164,11 @@ extension NodeView {
         guard inside else { return }
         paintPress(true)
         aimPress(true)
+    }
+
+    /// Reconciles a carried row's feedback after its style or cell changed.
+    package func refreshGroupedPress() {
+        if pressed || holds("active") { showPress(holds("active") || !pressPaint.outside) }
     }
 
     private func aimPress(_ down: Bool, release: Bool = false) {
@@ -196,7 +207,7 @@ extension NodeView {
     /// box resolved against the box as it stands now, as CSS resolves them,
     /// so a box that changes size stays where `-50% -50%` puts it.
     package var translate: CGPoint {
-        CGPoint(x: translatePx.x + translatePercent.x / 100 * bounds.width, y: translatePx.y + translatePercent.y / 100 * bounds.height)
+        CGPoint(x: translatePx.x + translatePercent.x / 100 * boxBounds.width, y: translatePx.y + translatePercent.y / 100 * boxBounds.height)
     }
 
     #if os(iOS) || os(tvOS)
@@ -280,7 +291,7 @@ extension NodeView {
     /// `transform-origin` in the box's own coordinates (LLP 1061 D6): each
     /// axis points or `{"pct": n}` of the border box; the centre when unset.
     var transformOriginPoint: CGPoint {
-        Self.resolveTransformOrigin(style, in: bounds)
+        Self.resolveTransformOrigin(style, in: boxBounds)
     }
 
     package static func resolveTransformOrigin(_ style: NodeStyle, in bounds: CGRect) -> CGPoint {
@@ -334,8 +345,8 @@ extension NodeView {
     /// UIKit transforms a view about its center.
     func topLayerFrame(in viewport: UIScrollView, containingBlock: CGRect? = nil) -> CGRect {
         guard let parent = superview else { return .zero }
-        let box = (containingBlock ?? CGRect(origin: .zero, size: bounds.size))
-            .offsetBy(dx: -bounds.width / 2, dy: -bounds.height / 2)
+        let box = (containingBlock ?? boxBounds)
+            .offsetBy(dx: -bounds.midX, dy: -bounds.midY)
             .applying(hostPlacement).offsetBy(dx: center.x, dy: center.y)
         return NativeGeometry.convert(box, from: parent, to: viewport).offsetBy(dx: -viewport.pageOrigin.x, dy: -viewport.pageOrigin.y)
     }
@@ -425,6 +436,12 @@ extension NodeView {
     /// How long a dim shows at least, so a quick tap still flashes.
     static let dimHold: CFTimeInterval = 0.1
 
+    /// A grouped cell's highlight and the dim share the author's opt-outs.
+    private var platformPressFeedback: Bool {
+        !authorsPress && !isNativeButton && !isSurfaceControl
+            && !handlers.contains("pointerdown") && !handlers.contains("pointerup")
+    }
+
     /// Whether a press shows the platform's dim: a node the host presses
     /// (a `press` handler or a custom invoker's visual contact),
     /// with no pressed look written (a
@@ -434,9 +451,10 @@ extension NodeView {
     /// window (a backdrop that closes a sheet shows nothing in UIKit). A
     /// native button is UIKit's own and never comes here.
     var platformPressDims: Bool {
-        guard !authorsPress, !isNativeButton, !isSurfaceControl,
-              handlers.contains("press") || pressContact?.invokerLook == true || overlayHoldsPress,
-              !handlers.contains("pointerdown"), !handlers.contains("pointerup") else { return false }
+        guard platformPressFeedback, handlers.contains("press") || pressContact?.invokerLook == true || overlayHoldsPress else { return false }
+        #if os(iOS) || os(tvOS)
+        if materialInteractive { return false }
+        #endif
         if let w = window {
             let r = convert(bounds, to: w)
             if r.width >= w.bounds.width, r.height >= w.bounds.height * 0.9 { return false }

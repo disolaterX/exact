@@ -45,6 +45,66 @@ final class GesturePrecedenceIOSTests: XCTestCase {
         wait(for: [turn], timeout: 1)
     }
 
+    func testABarSearchSwipeSharesNativeEditingGesturesAndYieldsToTheLoupe() throws {
+        let p = host([
+            ["op": "create", "id": 1, "kind": "input", "props": ["type": "search"]],
+            ["op": "roots", "ids": [1]],
+        ])
+        let source = try XCTUnwrap(p.views[1])
+        let search = HeaderSearch(host: p.navigation), field = search.controller.searchBar.searchTextField
+        let swipe = HeaderSearchSwipe(search, field: source)
+        field.addGestureRecognizer(swipe)
+        let tap = UITapGestureRecognizer(), loupe = UILongPressGestureRecognizer(), selection = UIPanGestureRecognizer()
+        for gesture in [tap, loupe, selection] { field.addGestureRecognizer(gesture) }
+        let outer = UIPanGestureRecognizer()
+        p.viewport.addGestureRecognizer(outer)
+        let authored = try XCTUnwrap(DiscreteSwipe(source, word: "down", touches: 1))
+        field.addGestureRecognizer(authored)
+        XCTAssertTrue(swipe.delegate === swipe, "the swipe does not replace UIKit's field delegate")
+        XCTAssertFalse(swipe.cancelsTouchesInView)
+        XCTAssertFalse(swipe.delaysTouchesBegan)
+        XCTAssertFalse(swipe.delaysTouchesEnded)
+        for gesture in [tap, loupe, selection] {
+            XCTAssertTrue(swipe.gestureRecognizer(swipe, shouldRecognizeSimultaneouslyWith: gesture))
+            XCTAssertTrue(gesture.isEnabled, "native editing recognizers stay enabled")
+        }
+        XCTAssertTrue(swipe.gestureRecognizer(swipe, shouldRequireFailureOf: loupe))
+        XCTAssertFalse(swipe.gestureRecognizer(swipe, shouldRequireFailureOf: tap))
+        XCTAssertFalse(swipe.gestureRecognizer(swipe, shouldRecognizeSimultaneouslyWith: outer))
+        XCTAssertFalse(swipe.gestureRecognizer(swipe, shouldRecognizeSimultaneouslyWith: authored), "Contract's swipe keeps its own arbitration")
+        XCTAssertFalse(swipe.gestureRecognizerShouldBegin(swipe), "an unmounted, unfocused search takes no swipe")
+    }
+
+    func testSwipePreflightUsesEachDragPansLiveTouchCountBounds() throws {
+        let p = host([
+            ["op": "create", "id": 1, "kind": "view", "props": ["reorderFor": "items"], "style": ["touch_action": "none"]],
+            ["op": "create", "id": 2, "kind": "view", "handlers": ["press"]],
+            ["op": "children", "id": 1, "ids": [2]], ["op": "roots", "ids": [1]],
+            ["op": "frame", "id": 1, "x": 0.0, "y": 0.0, "w": 300.0, "h": 200.0],
+            ["op": "frame", "id": 2, "x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0],
+            ["op": "height-drag", "id": 1, "target": 2, "handleKey": "1", "targetKey": "2"],
+            ["op": "transform-drag", "id": 1, "target": 2, "clip": 1, "runtime": "1", "handleKey": "1", "targetKey": "2", "clipKey": "1"],
+        ])
+        let node = try XCTUnwrap(p.views[1]), capability = try XCTUnwrap(DragLink.installed)
+        let reorder = try XCTUnwrap(node.reorderPan), height = try XCTUnwrap(node.heightRecognizer), transform = try XCTUnwrap(node.transformRecognizer)
+        let pans = [(reorder, 1), (height, 1), (transform, 2)]
+        let start = node.convert(CGPoint(x: 150, y: 100), to: nil), travel = CGPoint(x: 0, y: 1)
+        for (pan, maximum) in pans {
+            for (other, _) in pans { other.isEnabled = false }
+            pan.isEnabled = true
+            XCTAssertEqual(pan.minimumNumberOfTouches, 1)
+            XCTAssertEqual(pan.maximumNumberOfTouches, maximum)
+            for count in 1...3 {
+                XCTAssertEqual(capability.blocksSwipe(node, touches: count, travel: travel, from: start, scrollBelow: false), count <= maximum,
+                    "\(type(of: pan)): \(count) touches, maximum \(maximum)")
+                XCTAssertEqual(capability.blocksSwipe(node, touches: count, travel: travel, from: start, scrollBelow: true), pan === reorder && count == 1,
+                    "height and transform leave a scroller below the handle its touch")
+            }
+            pan.isEnabled = false
+            XCTAssertFalse(capability.blocksSwipe(node, touches: 1, travel: travel, from: start, scrollBelow: false), "a disabled recognizer takes none")
+        }
+    }
+
     /// LLP 1005 §3: a node hearing `pointerdown`/`pointerup` carries an
     /// observer that never recognizes, so it takes nothing from a press or a
     /// scroll; its touch down and up are the two events.

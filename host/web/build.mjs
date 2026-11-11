@@ -115,9 +115,9 @@ if (target !== '--wasm' && !game && !bakeOnly) {
   const said = (text) => (text ?? '').replaceAll(stage, dist);
   js.stderr = said(js.stderr);
   process.stdout.write(said(js.stdout));
-  // The compiler's warnings, as `contract build` says them, its file from here: the count names them (LLP 1116.004 D7).
-  const compiler = compilerWarnings(js.stderr);
   if (js.status === 0) {
+    // The compiler's warnings, as `contract build` says them, its file from here: the count names them (LLP 1116.004 D7).
+    const compiler = compilerWarnings(js.stderr);
     // What the JS target warned of, in its own words: the count it prints names nothing (workout F3, kanban F30).
     // The bundler's notes on the generated glue are not the app's to act on. The types app.ts imports, when
     // the build rewrote them, are one line (LLP 1116.001 D4.5).

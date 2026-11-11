@@ -229,12 +229,13 @@ component App
             text "Two eggs, a cup of flour, a cup of milk." padding=16 testId="recipe-body"
 ```
 
-- A window 900 px wide or more on the web shows the list beside its detail, as a split view
-  does, with nothing to write: the first route's rows push (a `link`, or a `press` that writes the
-  router) and draw the `forward-chevron`; a chevron on a row that only selects is decoration. A
-  phone pushes. A row pressed while a detail shows pushes another; to swap the detail instead,
-  `open` replaces when one shows: `nav = top(nav).name == "recipe" ? replace(nav,
-  path("recipe", name)) : push(nav, path("recipe", name))`.
+- A wide window shows the list beside its detail, as a split view does, with nothing to write:
+  900 px and up on the web, and on iOS UIKit's split view where UIKit shows both columns (the
+  iPhone Duo open upright), outside a tab (LLP 1127). The first route's rows push (a `link`, or a
+  `press` that writes the router) and draw the `forward-chevron`; a chevron on a row that only
+  selects is decoration. A narrow window pushes. A row pressed while a detail shows pushes
+  another; to swap the detail instead, `open` replaces when one shows: `nav = top(nav).name ==
+  "recipe" ? replace(nav, path("recipe", name)) : push(nav, path("recipe", name))`.
 - The chevron is the row's last child with no colour or size of yours: UIKit's grey
   disclosure. A row that wraps (`flex-wrap`) at large text sizes wraps its parts in a `row
   flex=1 min-width=0 flex-wrap="wrap"` and leaves the chevron after it, at the trailing edge.
@@ -484,8 +485,32 @@ component App
 
 More: docs/recipes/persisted-setting.md
 
-## swipe: a list row's swipe actions
-names: delete, swipe-actions, swipeActions, swipe-to-delete, swipeleft, swipeContent, swipeLeading, swipeTrailing, swipe actions
+## swipe: a discrete swipe, a swipe to reply, a list row's swipe actions
+names: delete, swipe-actions, swipeActions, swipe-to-delete, swipeleft, swipeContent, swipeLeading, swipeTrailing, swipe actions, swiperight, swipe-direction, touch-count, SwipeEvent
+
+Three things are called a swipe. `swipe=action` with `swipe-direction` (and `touch-count`) is
+a discrete swipe: the platform's own recognizer says a flick went one of the named ways and
+the action runs once, nothing following the finger. UIKit recognizes it on iOS, and AppKit on
+the Mac as its swipe event, the way the fingers went and before history's Back and Forward: a
+trackpad's three-finger swipe where "Swipe between pages" uses three fingers, or a mouse
+driver's side button. A two-finger swipe goes back and forward through pages, as in any Mac
+app, and a swipe up or down reaches the app only where Mission Control and App Exposé leave
+three fingers moving vertically to apps. AppKit reports no finger count, so on the Mac a swipe
+with a `touch-count` never runs. On Android it is the platform's fling, which a field, control
+or `press` node between keeps, and a `touch-count` there counts the most fingers the touch had
+down at once. tvOS, the web, Linux and Windows make none. Give its action a button too: a swipe is a path gesture (WCAG 2.2, 2.5.1).
+`swiperight=action` is a drag: the node follows the finger to the right and releases past a
+knee (a swipe to reply). A list row's swipe actions are below.
+
+```contract
+component App
+  action hideKeys
+    blur("message")
+  view
+    row swipe=hideKeys swipe-direction="down"
+      textarea id="message" field-sizing="content" flex=1
+      button "Done" press=hideKeys
+```
 
 `delete=action` on a list row is its swipe to delete: a red Delete beside the row, which a
 full swipe performs. On iOS it is UIKit's own swipe action; on the web and the Mac the row
@@ -1139,6 +1164,11 @@ component App
   `backgroundMaterial`, which wins when both are written.
 - A navigation bar's buttons share one glass capsule on iOS 26; `buttonStyle="glass"` on
   each gives it a capsule of its own (`contract vocab bar-buttons`).
+- On iOS 26, glass answers a finger on a pressable box, a popover invoker, or a box
+  framing one enabled text field. Removing or disabling the field withdraws that feedback.
+- A content popover opened from a glass `backgroundMaterial` uses UIKit's popover on
+  iOS 26 and stands down the software keyboard while keeping the field's focus. A
+  `popover="manual"` keeps its authored dismissal and shows over the current card.
 
 ## bar-buttons: the navigation bar's buttons, grouped or each in its own capsule
 names: bar button, bar-button, barbuttons, UIBarButtonItem, sharesBackground, headerRight, headerLeft, toolbarItem, ToolbarItem, ToolbarItemGroup

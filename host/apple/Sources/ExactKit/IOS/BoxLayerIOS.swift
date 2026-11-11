@@ -72,6 +72,7 @@ extension NodeView {
     /// canvas's capture (`render(in:)`) drops masks and would show the tint's
     /// whole rectangle, so the template is `draw(_:)`'s, from the same pixels.
     func applyImageLayer() {
+        defer { syncBackgroundExtension() }
         guard !cssVisibilityHidden, kind == "image", symbolView == nil, style["tint_color"] == nil, let bitmap = raster?.image ?? flightLook?.stand?.image else {
             imageLayer?.removeFromSuperlayer(); imageLayer = nil; return
         }
@@ -232,6 +233,12 @@ extension NodeView {
         let scale = window?.screen.scale ?? contentScaleFactor
         return max(1, (width * scale + 0.001).rounded(.down)) / scale
     }
+    /// The border's widths, top, right, bottom and left, on the device's
+    /// pixels, as the box's painter draws them.
+    var borderWidths: [CGFloat] {
+        let uniform = number("border_width")
+        return ["top", "right", "bottom", "left"].map { devicePixels(number("border_width_" + $0, uniform)) }
+    }
 
     /// The box onto the layer, or `boxDrawn` when `draw(_:)` must paint it.
     /// The web's box: background and border inside the border box, a
@@ -239,13 +246,12 @@ extension NodeView {
     /// where the overflow clips.
     func applyBoxLayer() {
         defer { syncEllipticalClip(); applyColorRanges() }
-        let authored = presenter?.segments.control(of: id) == nil && !groundIsSheets ? cgColor("background_color") : nil
+        let authored = presenter?.segments.control(of: id) == nil && !groundIsSheets && !groundIsColumns ? cgColor("background_color") : nil
         let ground = authored == nil ? fieldGround : nil
         let background = authored ?? ground
         let fill = background.flatMap { $0.alpha > 0 ? $0 : nil }
-        let uniform = number("border_width")
         let sides = ["top", "right", "bottom", "left"]
-        let widths = sides.map { devicePixels(number("border_width_" + $0, uniform)) }
+        let widths = borderWidths
         let top = color("border_color_top", .clear)
         let colors = sides.map { color("border_color_" + $0, top).cgColor }
         let width = widths[0]

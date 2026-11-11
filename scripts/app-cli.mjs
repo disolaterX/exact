@@ -24,12 +24,16 @@ export function compilerWarnings(text, cwd = process.cwd()) {
 }
 
 /** What a failed JS-target web build (`host/web-js/build.mjs`) said that is the app's to act on, from its stderr: the
- * types app.ts imports when rewritten, warnings, the diagnostics, then the compiler's warnings. Cargo's progress, a
- * rustc warning's excerpt and Bun's trace (a frame and its version line) are left out; with no diagnostic, the last
- * three lines stand for one. */
+ * types app.ts imports when rewritten, warnings, the diagnostics, then the compiler's warnings. A Contract refusal
+ * (`file:line:col [code] reason`) and everything after it are kept as they are, its related locations and excerpt
+ * included. Cargo's progress, a rustc warning's excerpt and Bun's trace (a frame and its version line) are left out;
+ * with no diagnostic, the last three lines stand for one. */
 export function webBuildFailure(stderr) {
+  const output = (stderr ?? '').trim().split('\n');
+  const refusal = output.findIndex((l) => /^\S.*:\d+:\d+ \[[a-z][\w-]*\] /.test(l));
+  const before = refusal < 0 ? output : output.slice(0, refusal);
   const ambientDiagnostic = (l) => /^.+:\d+:\d+: .+ is unavailable in data sources[;:]/.test(l);
-  const all = (stderr ?? '').trim().split('\n').filter((l) => ambientDiagnostic(l) || !/^\s*(Compiling|Finished|Running)/.test(l) && !compilerWarnings(l).length);
+  const all = before.filter((l) => ambientDiagnostic(l) || !/^\s*(Compiling|Finished|Running)/.test(l) && !compilerWarnings(l).length);
   const warnings = all.filter((l) => !ambientDiagnostic(l) && /^warning: /.test(l)), lines = all.filter((l) => ambientDiagnostic(l) || !/^\s*warning/.test(l));
   // Keep TypeScript's lines (`app.ts(2,8): error TS…`), the shared ambient
   // check's file:line:col diagnostics, including paths with spaces, and its
@@ -51,9 +55,10 @@ export function webBuildFailure(stderr) {
     i = end - 1;
   }
   // The bundler's refusal, in the words the type check uses (`Error: ` is its wrapper).
-  const reason = (message.length ? message : lines.slice(-3)).map((l) => l.replace(/^Error: (?=module outside captured app: )/, '')).join('\n');
+  const said = message.map((l) => l.replace(/^Error: (?=module outside captured app: )/, ''));
+  const reason = (refusal >= 0 ? [...said, ...output.slice(refusal)] : said.length ? said : lines.slice(-3)).join('\n');
   const types = all.filter((l) => /^app\.contract\.d\.ts: /.test(l));
-  return [...types, ...warnings, reason, ...compilerWarnings(stderr)];
+  return [...types, ...warnings, reason, ...compilerWarnings(before.join('\n'))];
 }
 
 /** A drive's lines for the compiler's `warnings` (`compilerWarnings`) of the app in `dir` built for `host`: the

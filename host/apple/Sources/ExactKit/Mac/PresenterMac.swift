@@ -134,7 +134,7 @@ package final class Presenter {
     /// What native presentations cover of boxes (LLP 1115.002 D8.1, CoversMac.swift).
     lazy var covers = HostCovers(self)
     lazy var statusItems = StatusItemHost(self)
-    var onCovers: (([(UInt32, HostCover?)]) -> Void)?
+    var onCovers: (([(UInt32, HostCover?)], [(UInt32, OwnerValues?)]) -> Void)?
     /// The border box a person dragged a box's `resize` grip to; nil keeps an axis (ResizeGrip.swift).
     var onResizeBox: ((UInt32, CGFloat?, CGFloat?) -> Void)?
     /// The root tab bar as the window's sidebar (LLP 1115.002 D3), and the kernel's rule for a root's tabs.
@@ -736,6 +736,7 @@ package final class Presenter {
     /// hover`); under the agent it stands for the system cursor.
     var agentPointer: NSPoint?
     var onSwiperight: ((UInt32) -> Void)?
+    var onSwipe: ((UInt32, String) -> Void)?
     /// Pull-to-refresh is UIKit's; AppKit has no such control, so this never fires.
     var onRefresh: ((UInt32) -> Void)?
     var onPan: ((UInt32, Double, Double) -> Void)?
@@ -961,6 +962,7 @@ package final class Presenter {
     func mouseEvent(_ id: UInt32, _ kind: UInt32, _ line: String) { send(id) { [self] in onClipboard?(id, kind, line) } }
     func dblclick(_ id: UInt32) { send(id) { [self] in onDblclick?(id) } }
     func pointer(_ id: UInt32, _ kind: PointerKind, _ sample: PointerSample) { send(id) { [self] in onPointer?(id, kind, sample) } }
+    func swipe(_ id: UInt32, _ direction: String) { send(id) { [self] in onSwipe?(id, direction) } }
     func pan(_ id: UInt32, _ dx: Double, _ dy: Double) { send(id) { [self] in onPan?(id, dx, dy) } }
     /// Once per pan that began, after its last delta; only to a node that hears it.
     func panRelease(_ id: UInt32, _ vx: Double, _ vy: Double) {

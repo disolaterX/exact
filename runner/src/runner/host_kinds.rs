@@ -128,8 +128,8 @@ impl Event {
     /// `0|1,ratio`), 46 and 47 (focusin, focusout), 50 (toggle, oldState,newState)
     /// 51 (scrollend, none), 52 (field selectionchange), 53/54
     /// (beforeinput/input metadata), 60 (historyswipe), 61 (swipeleft,
-    /// none), or 62 and 63 (a scroll drag's start, none, and its release,
-    /// `ScrollDrag`) from its UTF-8 payload.
+    /// none), 62 and 63 (a scroll drag's start, none, and its release,
+    /// `ScrollDrag`), or 64 (swipe, its direction) from its UTF-8 payload.
     pub fn of_host_kind(kind: u32, payload: &str) -> Result<Event, &'static str> {
         match kind {
             // A key's down (6), up (43) or capture (44, #140): the chord, then its code,
@@ -194,6 +194,11 @@ impl Event {
                         .map(|(kind, v)| Event::FrameRecord(kind, Box::new(v)))
                 })
                 .ok_or("invalid frame event"),
+            // A discrete swipe's direction (LLP 1057.001 §8.5).
+            64 => match payload {
+                "left" | "right" | "up" | "down" => Ok(Event::Swipe(payload.to_owned())),
+                _ => Err("invalid swipe direction"),
+            },
             // A press on an inline atom (LLP 1045.000 D7).
             59 => super::AtomEvent::parse(payload)
                 .map(Event::Atompress)

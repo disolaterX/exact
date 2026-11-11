@@ -57,6 +57,13 @@ fn indicator(base: f64, caught: f64, progress: f64) -> f64 {
 }
 
 impl<D: DataSource> Presenter<D> {
+    /// Whether sideways motion by `dx` is the swipe's (`Ways::starts`).
+    pub(super) fn swipe_admits_motion(&self, key: NodeKey, dx: f64) -> bool {
+        let view = self.host.kernel().node_by_key(key).unwrap().id;
+        self.swipe_ways(key)
+            .starts(dx, self.host.presented(view).translate.0 as f64)
+    }
+
     pub(super) fn swipe_candidate(&self, hit: NodeKey) -> Option<NodeKey> {
         if self
             .host

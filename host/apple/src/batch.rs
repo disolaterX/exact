@@ -40,6 +40,10 @@ pub struct Batch {
     pub waits: Option<exact_runner::Waits>,
     /// Independent platform timer instances, including an empty cancellation list.
     pub native_timers: Option<Vec<exact_runner::NativeTimer>>,
+    /// The lists whose rows a runner commit moved, `"rides":[…]`: the
+    /// presenter moves each of their rows from where it showed, as a
+    /// collection view's batch update does (`Host::measure_collections`).
+    pub rides: Vec<u32>,
     /// The kernel transactions this batch carries, `"seq":[first,last]`,
     /// when the runner measures (LLP 1079 D3): the frame sampler's join.
     pub seq: Option<(u64, u64)>,
@@ -347,6 +351,11 @@ impl Batch {
     /// Whether nothing was recorded.
     pub fn is_empty(&self) -> bool {
         self.ops.is_empty()
+    }
+
+    /// How many ops were recorded.
+    pub(crate) fn op_count(&self) -> usize {
+        self.ops.len()
     }
 
     /// Mounted collection metadata from the runner's common JSON array writer.
@@ -782,6 +791,52 @@ impl Batch {
         self.ops.push(s);
     }
 
+    /// PROTO (rule 4): `{"op":"far","id":…,"x":…,"y":…,"w":…,"h":…,"property":"<route> <x y w h now>[; <t x y w h>]…"}`,
+    /// the node's frame with its route's top edge at the block's top, its frame now, and its
+    /// frame at each knot between, `t` of the way from now to the block's top.
+    pub fn far(
+        &mut self,
+        id: u32,
+        route: u32,
+        now: [f32; 4],
+        [x, y, w, h]: [f32; 4],
+        knots: &[(f32, [f32; 4])],
+    ) {
+        let mut s = String::with_capacity(80);
+        let _ = write!(s, "{{\"op\":\"far\",\"id\":{id},\"x\":");
+        crate::style::push_num(&mut s, x);
+        s.push_str(",\"y\":");
+        crate::style::push_num(&mut s, y);
+        s.push_str(",\"w\":");
+        crate::style::push_num(&mut s, w);
+        s.push_str(",\"h\":");
+        crate::style::push_num(&mut s, h);
+        let _ = write!(
+            s,
+            ",\"property\":\"{route} {} {} {} {}",
+            now[0], now[1], now[2], now[3]
+        );
+        for (t, k) in knots {
+            let _ = write!(s, "; {t} {} {} {} {}", k[0], k[1], k[2], k[3]);
+        }
+        s.push_str("\"}");
+        self.ops.push(s);
+    }
+
+    /// PROTO (rule 4): `route`'s far frames are replaced by the `far` ops that follow; the far
+    /// pass took `micros` and `trials` trial layouts.
+    pub fn far_reset(
+        &mut self,
+        route: u32,
+        micros: u64,
+        trials: u32,
+        [copy, lay, collect]: [u64; 3],
+    ) {
+        self.ops.push(format!(
+            "{{\"op\":\"far\",\"id\":{route},\"property\":\"reset {micros} {trials} copy {copy} layout {lay} collect {collect}\"}}"
+        ));
+    }
+
     /// Twice the sibling paint rank, losslessly encoded (LLP 1083.000 D4).
     pub fn rank(&mut self, id: u32, rank: i64) {
         self.ops
@@ -962,6 +1017,16 @@ impl Batch {
         if self.frames {
             s.push_str(",\"frames\":true");
         }
+        if !self.rides.is_empty() {
+            s.push_str(",\"rides\":[");
+            for (i, id) in self.rides.iter().enumerate() {
+                if i != 0 {
+                    s.push(',');
+                }
+                let _ = write!(s, "{id}");
+            }
+            s.push(']');
+        }
         if self.canvas_owed {
             s.push_str(",\"canvasOwed\":true");
         }
@@ -1039,8 +1104,8 @@ fn layout_geometry(op: &str) -> bool {
         .and_then(|s| s.split('"').next());
     match kind {
         Some(
-            "frame" | "content" | "fieldContent" | "flow" | "sticky" | "fragments" | "region"
-            | "native-region" | "svg",
+            "frame" | "far" | "content" | "fieldContent" | "flow" | "sticky" | "fragments"
+            | "region" | "native-region" | "svg",
         ) => true,
         Some("present") => ["translate", "scale", "rotate", "layout", "height"]
             .iter()

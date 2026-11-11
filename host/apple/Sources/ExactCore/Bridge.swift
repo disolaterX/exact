@@ -44,6 +44,9 @@ public struct Batch {
     public var nativeTimers: [NativeTimerWake]?
     public var timerWaits: [Double] = []
     public var waitContinue = false
+    /// The lists whose rows a runner commit moved: each of their rows
+    /// moves from where it showed, as a collection view's batch update.
+    public var rides: [UInt32] = []
     /// A canvas draw is owed to a turn of its own (LLP 1072 §8.5).
     public var canvasOwed = false
     /// A control's viewless contents changed (LLP 1069.011 §9).
@@ -441,6 +444,10 @@ package final class Runtime {
     /// the pointer was as it began, in the viewport.
     package func historySwipe(_ view: UInt32, phase: String, direction: String, amount: Double, client: CGPoint, now: Double) -> Batch {
         on { read(exact_dispatch(rt, view, 60, write("\(phase),\(direction),\(amount),\(Double(client.x)),\(Double(client.y))"), now)) }
+    }
+    /// A discrete swipe the platform recognized, in `direction` (64, LLP 1057.001 §8).
+    package func swipe(_ view: UInt32, direction: String, now: Double) -> Batch {
+        on { read(exact_dispatch(rt, view, 64, write(direction), now)) }
     }
     package func refresh(_ view: UInt32, now: Double) -> Batch { on { read(exact_dispatch(rt, view, 22, 0, now)) } }
     package func pan(_ view: UInt32, dx: Double, dy: Double, now: Double) -> Batch {

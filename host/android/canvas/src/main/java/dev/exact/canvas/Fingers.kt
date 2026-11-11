@@ -21,8 +21,8 @@ internal class Fingers(private val view: ExactView) {
     /** A touch began: before anything else (a hosted field, a scroll) can take its events. */
     fun began(e: MotionEvent) { first = e.getPointerId(0); down.clear() }
 
-    /** What [e] is to the touch exact2 hears: 0 down, 1 up, 2 move or 3 cancel, of the first finger at [index]; -1 when
-     * it was only the other fingers'. */
+    /** What [e] is to the touch exact2 hears: 0 down, 1 up, 2 move, 3 cancel, or 5 the system's cancel, which also ends
+     * the touch's pending fling ([Flings]), of the first finger at [index]; -1 when it was only the other fingers'. */
     fun touch(e: MotionEvent): Int {
         index = 0
         when (e.actionMasked) {
@@ -53,7 +53,7 @@ internal class Fingers(private val view: ExactView) {
                 // exact2 cancels the fingers it took with the touch.
                 down.clear()
                 index = e.findPointerIndex(first).coerceAtLeast(0); first = -1
-                return 3
+                return if (e.actionMasked == MotionEvent.ACTION_CANCEL) 5 else 3
             }
         }
     }

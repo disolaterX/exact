@@ -25,6 +25,7 @@ mod launch;
 pub(crate) mod line_height;
 mod miswiring;
 mod nested_header;
+mod owner_env;
 mod parts;
 mod roles;
 mod root_replace;
@@ -35,6 +36,7 @@ mod scroll_bound;
 mod sounds;
 mod states;
 mod svg;
+mod tabs;
 mod title;
 mod width;
 pub(crate) use width::horizontal_flex;
@@ -73,7 +75,7 @@ pub(crate) fn with_text_styles(checked: &Checked<'_>, lowered: &TextStyles) -> V
     crate::symbols::tints(&root.view, &checked.file.styles, lowered, &mut out);
     let mut stack: Vec<(&Node, bool, Option<&str>)> =
         root.view.iter().rev().map(|n| (n, false, None)).collect();
-    let (mut seen, mut platform) = (BTreeSet::new(), Vec::new());
+    let (mut seen, mut platform, mut owned) = (BTreeSet::new(), Vec::new(), BTreeSet::new());
     while let Some((node, in_root, back)) = stack.pop() {
         let (children, in_root, back): (Vec<&Node>, bool, Option<&str>) = match node {
             Node::Element {
@@ -111,15 +113,23 @@ pub(crate) fn with_text_styles(checked: &Checked<'_>, lowered: &TextStyles) -> V
                 // A route that says it has no bar (LLP 1115.000 D5.2) draws its header as written.
                 let no_bar = literal(attrs, "navigationBar") == Some("none");
                 if route && !no_bar {
-                    route_header(children, &[], &mut out);
+                    route_header(children, &[], &checked.file.styles, &mut out);
                     nested_header::nested_header(children, &mut out);
                     fixed_beside::fixed_beside((tag, attrs), children, &mut out);
                 }
                 if let (true, Some(name)) = (route, back) {
                     drawn_back(attrs, children, name, &mut out);
                 }
+                if route {
+                    owner_env::env_in_owner(
+                        std::slice::from_ref(node),
+                        &checked.file.styles,
+                        &mut owned,
+                        &mut out,
+                    );
+                }
                 if literal(attrs, "role") == Some("tablist") {
-                    single_tab(node, &mut out);
+                    tabs::single_tab(node, &mut out);
                 }
                 let back = if keyed && !in_root {
                     literal(attrs, "navigationBack").filter(|name| !name.is_empty())
@@ -340,42 +350,10 @@ fn holds_heading(node: &Node) -> bool {
     })
 }
 
-/// A box with a literal fill: before the heading, the title's avatar.
-fn filled(node: &Node) -> bool {
-    let Node::Element { attrs, .. } = node else {
-        return false;
-    };
-    has(attrs, "background-color") || has(attrs, "background")
-}
-
-/// A passive box of texts and symbol images, one of each at least: a
-/// subtitle's line of glyphs (Signal's "🔕 Muted ⏱ 1w").
-fn glyph_line(node: &Node) -> bool {
-    let (mut symbol, mut text) = (false, false);
-    for k in kids(node) {
-        match (part(k), k) {
-            (Part::Text, _) => text = true,
-            (
-                Part::Other,
-                Node::Element {
-                    tag, positional, ..
-                },
-            ) if tag == "image" => match positional.first() {
-                // A computed source may be a symbol: the benefit.
-                Some(Expr::Str(s, _)) if !s.starts_with("symbol:") => return false,
-                Some(_) => symbol = true,
-                None => return false,
-            },
-            (Part::Hidden, _) => {}
-            _ => return false,
-        }
-    }
-    symbol && text && !filled(node)
-}
-
 /// What the walk of one header has seen.
 #[derive(Default)]
 struct Bar<'a> {
+    styles: &'a [StyleDecl],
     headings: usize,
     /// The last heading counted: the bar's title when it is the one.
     title: Option<&'a Node>,
@@ -408,14 +386,19 @@ const OR_NO_BAR: &str = "; or, for a site's header, say `appearance=\"none\"` on
 /// header is shown as written: `lower-header-no-bar`'s (LLP 1116.003 D2.2).
 /// An `if` first among the route's children is read branch by branch: a branch's first node
 /// is the route's first child while it is taken, and `after` the route's nodes past that `if`.
-fn route_header<'a>(children: &'a [Node], after: &[&'a Node], out: &mut Vec<LowerError>) {
+fn route_header<'a>(
+    children: &'a [Node],
+    after: &[&'a Node],
+    styles: &'a [StyleDecl],
+    out: &mut Vec<LowerError>,
+) {
     if let Some(Node::When {
         then, otherwise, ..
     }) = children.first()
     {
         let rest: Vec<&Node> = children[1..].iter().chain(after.iter().copied()).collect();
-        route_header(then, &rest, out);
-        route_header(otherwise, &rest, out);
+        route_header(then, &rest, styles, out);
+        route_header(otherwise, &rest, styles, out);
         return;
     }
     let Some(header @ Node::Element { tag, attrs, .. }) = children.first() else {
@@ -424,8 +407,11 @@ fn route_header<'a>(children: &'a [Node], after: &[&'a Node], out: &mut Vec<Lowe
     if tag != "header" || nested_header::no_bar(attrs) {
         return;
     }
-    let mut bar = Bar::default();
-    walk(kids(header), &mut bar);
+    let mut bar = Bar {
+        styles,
+        ..Bar::default()
+    };
+    walk(kids(header), &mut bar, false);
     if bar.headings != 1 {
         if !bar.doubt {
             out.push(LowerError {
@@ -455,7 +441,7 @@ fn route_header<'a>(children: &'a [Node], after: &[&'a Node], out: &mut Vec<Lowe
     }
 }
 
-fn walk<'a>(nodes: &'a [Node], bar: &mut Bar<'a>) {
+fn walk<'a>(nodes: &'a [Node], bar: &mut Bar<'a>, grouped: bool) {
     for node in nodes {
         let span = node.span();
         match part(node) {
@@ -477,11 +463,14 @@ fn walk<'a>(nodes: &'a [Node], bar: &mut Bar<'a>) {
             // A pressable box around the heading is the title, tapped.
             Part::Pressable if !bar.tap && has_press(node) && holds_heading(node) => {
                 bar.tap = true;
-                walk(kids(node), bar);
+                walk(kids(node), bar, true);
             }
             Part::Pressable => {}
             // A status around the heading is no readout: walked for it.
-            Part::Status if holds_heading(node) => walk(kids(node), bar),
+            Part::Status if holds_heading(node) => {
+                let grouped = grouped || title::wrapper(node, bar.styles);
+                walk(kids(node), bar, grouped)
+            }
             Part::Status => {}
             Part::Text if bar.passed && !bar.subtitle => bar.subtitle = true,
             Part::Text => bar.unplaced.push((
@@ -492,11 +481,18 @@ fn walk<'a>(nodes: &'a [Node], bar: &mut Bar<'a>) {
                     "this text, before the heading,".into()
                 },
             )),
-            Part::Box if bar.passed && !bar.subtitle && glyph_line(node) => bar.subtitle = true,
-            Part::Box if !bar.passed && !bar.avatar && filled(node) && !holds_heading(node) => {
+            Part::Box if bar.passed && !bar.subtitle && title::glyph_line(node, bar.styles) => {
+                bar.subtitle = true
+            }
+            Part::Box
+                if grouped && !bar.passed && !bar.avatar && title::avatar(node, bar.styles) =>
+            {
                 bar.avatar = true;
             }
-            Part::Box if holds_placed(node) => walk(kids(node), bar),
+            Part::Box if holds_placed(node) => {
+                let grouped = grouped || title::wrapper(node, bar.styles);
+                walk(kids(node), bar, grouped)
+            }
             // A box with nothing in it lays the bar's items out (a spacer).
             Part::Box if kids(node).is_empty() => {}
             Part::Box => bar.unplaced.push((span, "this box".into())),
@@ -607,43 +603,6 @@ fn drawn_back(route: &[Attr], children: &[Node], name: &str, out: &mut Vec<Lower
             Node::Use { children, .. } => stack.extend(children.iter().rev()),
             Node::Children { .. } => {}
         }
-    }
-}
-
-/// `lower-single-tab`: a root tab bar (a `role="tablist"` whose tabs name
-/// their panels with `aria-controls`) with fewer than two tabs (LLP 1116
-/// D6): a bar of one tab under a single screen, which builders copied from
-/// a tab skeleton (polls, chat-rooms).
-fn single_tab(tablist: &Node, out: &mut Vec<LowerError>) {
-    let (mut tabs, mut controls, mut doubt) = (0, false, false);
-    let mut stack: Vec<&Node> = kids(tablist).iter().collect();
-    while let Some(node) = stack.pop() {
-        match node {
-            Node::Element {
-                attrs, children, ..
-            } => {
-                if computed(attrs, "role") {
-                    doubt = true;
-                } else if literal(attrs, "role") == Some("tab") {
-                    tabs += 1;
-                    controls |= has(attrs, "aria-controls");
-                } else {
-                    stack.extend(children);
-                }
-            }
-            _ => doubt = true,
-        }
-    }
-    if controls && !doubt && tabs < 2 {
-        out.push(LowerError {
-            id: "lower-single-tab",
-            message: format!(
-                "this tab bar has {} tab{}: a tab bar is for moving between two or more sections, and one tab is a bar that does nothing. For a single screen, drop the `role=\"tablist\"` and the `tabpanel` around the routes, so the routes are the navigation root's children (one stack); add the other tabs if the app has them (docs/contract-for-agents.md, \"Tabs and stacks\")",
-                tabs,
-                if tabs == 1 { "" } else { "s" }
-            ),
-            span: tablist.span(),
-        });
     }
 }
 

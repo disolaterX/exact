@@ -383,6 +383,7 @@ fn host_event_kinds_round_trip_through_the_enum_codec() {
         EventKind::Swipeleft,
         EventKind::Scrolldragstart,
         EventKind::Scrolldragend,
+        EventKind::Swipe,
     ] {
         let mut plan = sample();
         plan.handlers[0].event = event;
@@ -1019,7 +1020,7 @@ fn a_plan_without_compiled_values_keeps_every_other_data_range() {
 #[test]
 fn the_format_digest_is_pinned() {
     assert_eq!(
-        FORMAT_DIGEST, 0xe1abb5602313209a,
+        FORMAT_DIGEST, 0x00d21890f205b183,
         "the plan format digest moved: if intended, name the break and the hosts that move"
     );
 }

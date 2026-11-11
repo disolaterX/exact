@@ -168,7 +168,8 @@ extension Agent {
         let bottom = min(max(caret.maxY + inset.bottom - editor.bounds.height, minimum), maximum)
         let tolerance = 1 / max(editor.traitCollection.displayScale, 1)
         let offset = editor.contentOffset.y
-        if editor.bounds.height <= 0 || (offset >= min(top, bottom) - tolerance && offset <= max(top, bottom) + tolerance) {
+        // A textarea whose text fits, or that clips it, stays at the top (`TextArea.pinned`)
+        if editor.bounds.height <= 0 || editor.pinned || (offset >= min(top, bottom) - tolerance && offset <= max(top, bottom) + tolerance) {
             pendingTextReveal = nil
             return false
         }
@@ -266,7 +267,7 @@ extension Agent {
     /// presentation transform applied (UIKit's conversion carries `transform`),
     /// as the web's `getBoundingClientRect` includes CSS transforms.
     package func box(_ v: UIView, region: CGRect? = nil) -> CGRect {
-        Self.box(region ?? v.bounds, of: v, viewport: presenter.viewport)
+        Self.box(region ?? (v as? NodeView)?.boxBounds ?? v.bounds, of: v, viewport: presenter.viewport)
     }
 
     static func box(_ bounds: CGRect, of v: UIView, viewport: UIScrollView) -> CGRect {
@@ -369,7 +370,7 @@ extension Agent {
             return reply
         }
         if presenter.inlineText(UInt32(id)) == nil {
-            node["radii"] = v.effectiveCornerSizes(in: v.bounds).map { [Double($0.width), Double($0.height)] }
+            node["radii"] = v.effectiveCornerSizes(in: v.boxBounds).map { [Double($0.width), Double($0.height)] }
         }
         let host = v.paragraphOwner
         // @ref LLP 1043.000 §3 D7 — diagnose actual painted fragments, not a replay.
@@ -378,7 +379,7 @@ extension Agent {
         }
         let vp = presenter.viewport
         let rect = { (r: CGRect) -> [String: Any] in ["x": Agent.r2(r.origin.x), "y": Agent.r2(r.origin.y), "w": Agent.r2(r.width), "h": Agent.r2(r.height)] }
-        let local = presenter.inlineText(UInt32(id)).map { host.inlineBounds($0) ?? .zero } ?? host.bounds
+        let local = presenter.inlineText(UInt32(id)).map { host.inlineBounds($0) ?? .zero } ?? host.boxBounds
         let b = presenter.inlineFrame(UInt32(id)) ?? box(host, region: local)
         var space: [String: Any] = ["viewport": rect(b), "local": ["w": Agent.r2(local.width), "h": Agent.r2(local.height)],
                                     "capture": ["scale": Agent.r2(vp.window?.screen.scale ?? vp.traitCollection.displayScale)]]
@@ -434,7 +435,7 @@ extension Agent {
         var clip: [[String: Any]] = []
         for (n, id, kind) in clippers.reversed() {
             clip.append(["id": Int(id), "kind": kind])
-            if let w = host.window, !host.convert(host.bounds, to: w).intersects(n.convert(n.bounds, to: w)) { clipped = true }
+            if let w = host.window, !host.convert(host.boxBounds, to: w).intersects(n.convert(n.bounds, to: w)) { clipped = true }
         }
         node["scroll"] = scroll
         node["clip"] = clip
@@ -465,6 +466,13 @@ extension Agent {
             var observation: [String: Any] = ["visible": shown != nil]
             if let shown { observation["frame"] = rect(box(shown)) }
             native["tabBar"] = observation
+        }
+        // A route's navigation bar, which draws its header (LLP 1115.000 D5.2)
+        if let route = navigation.controllers[host.id], route.node === host, let nav = route.navigationController {
+            let shown = !nav.isNavigationBarHidden && nav.navigationBar.window != nil
+            var observation: [String: Any] = ["visible": shown]
+            if shown { observation["frame"] = rect(box(nav.navigationBar)) }
+            native["navigationBar"] = observation
         }
         if let segment = presenter.segments.observation(host) { native["segmentedControl"] = segment }
         if let grouped = presenter.groupedLists?.observation(host) { native["groupedList"] = grouped }
@@ -507,6 +515,7 @@ extension Agent {
     }
 
     func tap(_ req: [String: Any]) -> [String: Any] {
+        if req["swipe"] != nil { return swipeTap(req) }
         if req["holdState"] != nil { return holdTap(req) } // a held state (LLP 1122 D8, HeldState.swift)
         // A drag of files from outside the app is the Mac's and the web's (FileDragMac.swift).
         if req["drop"] != nil || req["dragenter"] != nil || req["dragleave"] != nil { return ["delivery": "unsupported", "reason": "iOS has no drag of files from outside the app: no drop, dragenter or dragleave"] }
@@ -532,6 +541,9 @@ extension Agent {
             return reply
         }
         if req["scrollDrag"] != nil { return scrollDrag(req) }
+        #if os(iOS)
+        if let reply = projectedTitleContext(req) { return delivered(reply, view(req)) }
+        #endif
         if view(req)?.placedAncestor?.placementHidden == true { return ["error": "placed child is hidden"] }
         if req["phase"] == nil, req["wheel"] == nil,
            let node = view(req), presenter.mounts(node), presenter.groupedLists?.draws(node.id) != true,
@@ -745,9 +757,9 @@ extension Agent {
             guard let handle = next as? NodeView, let clipID = presenter.transformBindings[handle.id]?.clip, let clip = presenter.views[clipID] else {
                 return ["error": "no photo binding (transformDragFor) at view \(v.id)"]
             }
-            let offset = (req["at"] as? [Double]).map { CGPoint(x: $0[0], y: $0[1]) } ?? CGPoint(x: handle.bounds.midX, y: handle.bounds.midY)
+            let offset = (req["at"] as? [Double]).map { CGPoint(x: $0[0], y: $0[1]) } ?? CGPoint(x: handle.boxBounds.midX, y: handle.boxBounds.midY)
             let point = handle.convert(offset, to: clip)
-            if let error = DragLink.installed?.recognizedPinch(handle, scale: scale, focal: CGPoint(x: point.x - clip.bounds.midX, y: point.y - clip.bounds.midY)) { return ["error": error] }
+            if let error = DragLink.installed?.recognizedPinch(handle, scale: scale, focal: CGPoint(x: point.x - clip.boxBounds.midX, y: point.y - clip.boxBounds.midY)) { return ["error": error] }
             return delivered(["tapped": Int(handle.id), "pinch": scale, "at": at, "delivery": "recognized"], hit)
         }
         if req["hover"] as? Bool == true {
@@ -908,7 +920,7 @@ extension Agent {
     /// none itself. `v` may be a native view standing for a node (a
     /// grouped list's cell or accessory).
     func obscured(_ v: UIView, at p: CGPoint, hit: UIView) -> String? {
-        if let container = presenter.keyboardContainer,
+        if !presenter.keysStoodDown, let container = presenter.keyboardContainer,
            let top = presenter.keyboardGuideTop(in: container), p.y >= container.convert(CGPoint(x: 0, y: top), to: nil).y {
             return "its middle is under the software keyboard; dismiss it or scroll the target above it first (state shows keyboard.top)"
         }
