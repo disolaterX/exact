@@ -1,10 +1,10 @@
 import { test } from 'bun:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync} from 'node:fs';
+import {existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { assertActivityRefusals } from './activities.mjs';
+import { assertActivityRefusals, packageActivityArm } from './activities.mjs';
 import { resolveApp } from '../../scripts/app.mjs';
 import { appleComposition, assertCapabilityFrameworks, loadedDylibs } from './link.mjs';
 import { systemFrameworks } from './compose.mjs';
@@ -100,6 +100,19 @@ test('activity refusals allow native APNs without activities and still scan ever
       writeFileSync(plist, JSON.stringify({ CFBundleExecutable: 'Binary' }));
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("the ActivityKit arm compiles Exact's own sources from an app's directory outside the checkout", () => {
+  const dir = mkdtempSync(join(tmpdir(), 'exact-activity-arm-')), previous = process.cwd();
+  let compiled;
+  const runApple = (cmd, args) => { compiled = args; throw new Error('compiled'); };
+  try {
+    process.chdir(dir);
+    assert.throws(() => packageActivityArm({ app: resolveApp('caltrain'), bundle: dir, directory: dir, triple: 'arm64-apple-ios17.0-simulator', sdk: dir, device: false, runApple }), /compiled/);
+    const sources = compiled.filter(arg => arg.endsWith('.swift'));
+    assert.equal(sources.length, 2);
+    for (const source of sources) assert.ok(existsSync(source), source);
+  } finally { process.chdir(previous); rmSync(dir, { recursive: true, force: true }); }
 });
 
 // The async iOS step supplies its just-built bundle. Glue has no assembled iOS fixture yet.
