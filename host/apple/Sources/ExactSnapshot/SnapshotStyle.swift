@@ -60,6 +60,8 @@ struct SnapshotStyle {
     init(_ node: HeadlessSession.Node) { rows = node.style }
 
     func has(_ key: String) -> Bool { rows[key] != nil }
+    /// LLP 1115.000 D2: false of a row the node only inherits.
+    func wrote(_ key: String) -> Bool { rows["written"]?.array?.contains(.string(key)) ?? false }
     func number(_ key: String) -> CGFloat? { rows[key]?.number.map { CGFloat($0) } }
     func string(_ key: String) -> String? { rows[key]?.string }
     /// Points, or a percentage against a basis; a calculation is refused by

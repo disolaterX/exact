@@ -105,6 +105,14 @@ package enum SnapshotAccent {
 /// hosts do; the calendar formats do not tick and draw as the kernel's
 /// text. A `progress` over an interval has `start` and `end` instants.
 package enum SnapshotLive {
+    /// A `progress`'s tint, as the running host draws it: its `accent-color`,
+    /// else a `color` written on the node; nil leaves the platform's tint,
+    /// since an inherited text colour is not the control's (LLP 1115 D4).
+    @available(iOS 17.0, macOS 14.0, watchOS 10.0, visionOS 26.0, *)
+    package static func progressTint(_ node: HeadlessSession.Node, dark: Bool) -> Color? {
+        let style = SnapshotStyle(node)
+        return SnapshotColor.color(style.color("accent_color") ?? (style.wrote("text_color") ? style.color("text_color") : nil), dark: dark)
+    }
     package enum Presentation: Equatable {
         case relative(Date), timer(Date), countdown(ClosedRange<Date>)
     }
@@ -175,7 +183,8 @@ struct SnapshotLiveText: View {
 /// determinate bar; else the activity indicator. A ring where the platform
 /// draws one: in the circular accessory family, or a `progress` the author
 /// rounded into a circle (`border-radius: 50%`, or at least half its box),
-/// as SwiftUI's circular capacity gauge draws the value.
+/// as SwiftUI's circular capacity gauge draws the value. Each is tinted as
+/// `SnapshotLive.progressTint` says.
 @available(iOS 17.0, macOS 14.0, watchOS 10.0, visionOS 26.0, *)
 struct SnapshotProgressView: View {
     let node: HeadlessSession.Node
@@ -201,6 +210,7 @@ struct SnapshotProgressView: View {
                 ProgressView()
             }
         }
+        .tint(SnapshotLive.progressTint(node, dark: scheme == .dark))
         .frame(width: node.contentBox.width, height: node.contentBox.height)
         .offset(x: node.contentBox.minX, y: node.contentBox.minY)
     }
@@ -211,7 +221,7 @@ struct SnapshotProgressView: View {
         #if os(iOS) || os(watchOS)
         Gauge(value: value, in: 0...total) { EmptyView() }
             .gaugeStyle(.accessoryCircularCapacity)
-            .tint(SnapshotColor.color(SnapshotStyle(node).color("accent_color") ?? SnapshotStyle(node).color("text_color"), dark: scheme == .dark))
+            .tint(SnapshotLive.progressTint(node, dark: scheme == .dark) ?? SnapshotColor.color(SnapshotStyle(node).color("text_color"), dark: scheme == .dark))
         #else
         ProgressView(value: value, total: total).progressViewStyle(.circular)
         #endif

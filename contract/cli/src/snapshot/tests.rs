@@ -1048,6 +1048,8 @@ fn snapshot_v1_admitted_paint_and_layout_bake() {
         r#"image "app:/train.png" width=40 height=30"#,
         r#"progress value=0.5 max=1"#,
         r#"progress start=1700000000000 end=1700003600000"#,
+        r##"progress value=0.5 accent-color="#5e5ce6""##,
+        r#"progress start=1700000000000 end=1700003600000 accent-color="auto""#,
         r#"time datetime=1792254600000 format="date-full""#,
         r#"time datetime=1792254600123 format="time-short""#,
         "link href=\"/\"\n      text title",

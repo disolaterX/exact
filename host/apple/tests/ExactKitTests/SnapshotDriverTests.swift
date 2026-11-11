@@ -788,6 +788,25 @@ final class SnapshotDriverTests: XCTestCase {
         }
     }
 
+    /// A `progress` is tinted by its `accent-color`, else by a `color`
+    /// written on it; an inherited colour leaves the platform's tint, as on
+    /// the running host.
+    func testProgressTakesItsAccentElseItsOwnColor() throws {
+        func tint(_ style: NodeStyle) -> Color.Resolved? {
+            let node = HeadlessSession.Node(id: 1, kind: "control", props: ["type": "progress", "value": "0.5"], style: style)
+            return SnapshotLive.progressTint(node, dark: false)?.resolve(in: EnvironmentValues())
+        }
+        func srgb(_ r: Double, _ g: Double, _ b: Double) -> Color.Resolved {
+            Color(.sRGB, red: r / 255, green: g / 255, blue: b / 255, opacity: 1).resolve(in: EnvironmentValues())
+        }
+        let indigo: BatchValue = [94, 92, 230, 255], red: BatchValue = [255, 0, 0, 255]
+        XCTAssertEqual(tint(["accent_color": indigo]), srgb(94, 92, 230))
+        XCTAssertEqual(tint(["accent_color": indigo, "text_color": red, "written": ["text_color"]]), srgb(94, 92, 230), "the accent wins")
+        XCTAssertEqual(tint(["accent_color": "auto", "text_color": red, "written": ["text_color"]]), srgb(255, 0, 0))
+        XCTAssertNil(tint(["accent_color": "auto", "text_color": red]), "an inherited colour is not the bar's")
+        XCTAssertNil(tint(["text_color": ["sys": "labelColor"]]))
+    }
+
     /// A real `time` node from the kernel carries its runs, so the live
     /// text takes the font the kernel measured it in.
     func testARealTimeNodeCarriesItsMeasuredFont() throws {
