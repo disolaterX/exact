@@ -807,6 +807,10 @@ extension NavigationHost {
             c.barItemsMade = [:]; c.barSpaces = [:]
             item.leftBarButtonItems = nil
             item.rightBarButtonItems = nil
+            #if !os(tvOS)
+            // A hidden bar's large title still sets where UIKit rests a pull of the route's scroller: a title's height past the top.
+            if item.largeTitleDisplayMode != .never { item.largeTitleDisplayMode = .never }
+            #endif
             return
         }
         item.title = shape?.title
